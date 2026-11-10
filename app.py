@@ -34,6 +34,180 @@ def get_fundamentals(ticker: str) -> dict:
     return S.load_fundamentals(ticker)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_ohlc(ticker: str, rng: str) -> pd.DataFrame:
+    return S.load_ohlc(ticker, rng)
+
+
+# ---------------------------------------------------------------------------
+# Technical chart (runs as a "fragment": changing its buttons only redraws this
+# chart instead of re-running the whole backtest)
+# ---------------------------------------------------------------------------
+
+TECH_INDICATORS = ["Volume", "SMA 20", "SMA 50", "SMA 200", "EMA 20", "Bollinger Bands",
+                   "RSI", "MACD"]
+TECH_HELP = (
+    "- **Volume** — how many shares traded in each candle.\n"
+    "- **SMA** — simple moving average of the last N candles (20 = short, 200 = long trend).\n"
+    "- **EMA 20** — like SMA 20 but reacts faster to recent prices.\n"
+    "- **Bollinger Bands** — 20-candle average ± 2 standard deviations; price near the top band "
+    "is stretched high, near the bottom stretched low.\n"
+    "- **RSI** — momentum from 0–100; above 70 often called overbought, below 30 oversold.\n"
+    "- **MACD** — difference between a fast and slow average; lines crossing hint at a "
+    "change in trend.")
+UP, DOWN = "#1baf7a", "#e34948"
+LINE_COLORS = {"SMA 20": "#2a78d6", "SMA 50": "#eb6834", "SMA 200": "#6250d6", "EMA 20": "#eda100"}
+
+
+def panel_label(fig: go.Figure, row: int, text: str) -> None:
+    """Small caption in the top-left corner of a lower chart panel."""
+    yref = "y domain" if row == 1 else f"y{row} domain"
+    fig.add_annotation(text=text, xref="paper", yref=yref, x=0, y=1, xanchor="left",
+                       yanchor="top", showarrow=False, font=dict(size=11, color="gray"))
+
+
+@st.fragment
+def technical_chart(ticker: str, daily: pd.DataFrame, from_csv: bool, cur: str):
+    from plotly.subplots import make_subplots
+
+    c1, c2 = st.columns([3, 1])
+    rng = c1.segmented_control("Range", list(S.CHART_RANGES), default="6M", key="tc_range")
+    style = c2.segmented_control("Style", ["Candles", "Line"], default="Candles", key="tc_style")
+    rng = rng or "6M"
+    style = style or "Candles"
+    inds = st.multiselect("Indicators", TECH_INDICATORS, default=["Volume", "SMA 50", "SMA 200"],
+                          key="tc_inds", help=TECH_HELP)
+
+    # ---- data
+    if from_csv:
+        if rng in S.INTRADAY:
+            st.info("1D, 7D and 1M need live intraday data from Yahoo. With an uploaded CSV, "
+                    "pick 3M or longer.")
+            return
+        full = S.ohlc_from_closes(daily)
+        if style == "Candles":
+            st.caption("Your CSV only has closing prices, so the chart is drawn as a line.")
+            style = "Line"
+    else:
+        try:
+            with st.spinner("Loading chart…"):
+                full = get_ohlc(ticker, rng)
+        except Exception as e:  # noqa: BLE001
+            reason = _short_reason(e)
+            st.warning(f"Couldn't load the {rng} chart ({reason}). Try another range, or wait "
+                       "a few minutes if Yahoo is limiting requests.")
+            return
+    view = S.crop_to_range(full, rng)
+    if len(view) < 2:
+        st.info("Not enough candles in this range yet — the market may not have opened. "
+                "Try 7D or longer.")
+        return
+
+    # ---- headline numbers (change is measured from the last close before the window)
+    before = full["Close"][full.index < view.index[0]]
+    base = float(before.iloc[-1]) if len(before) else float(view["Open"].iloc[0])
+    last = float(view["Close"].iloc[-1])
+    chg = (last / base - 1) * 100
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Last price", f"{last:,.2f}", f"{chg:+.2f}% over {rng}")
+    m2.metric(f"{rng} high", f"{view['High'].max():,.2f}")
+    m3.metric(f"{rng} low", f"{view['Low'].min():,.2f}")
+    vol = view["Volume"].sum()
+    m4.metric(f"{rng} volume", f"{vol / 1e6:,.1f} M shares" if vol and not np.isnan(vol) else "–")
+
+    # ---- indicators on the full download, then cropped to the window
+    close = full["Close"]
+    ind = {}
+    for n in (20, 50, 200):
+        if f"SMA {n}" in inds:
+            ind[f"SMA {n}"] = S.sma(close, n)
+    if "EMA 20" in inds:
+        ind["EMA 20"] = S.ema(close, 20)
+    show_vol = "Volume" in inds and view["Volume"].notna().any() and view["Volume"].sum() > 0
+    panels = ["price"] + (["volume"] if show_vol else []) + \
+             (["rsi"] if "RSI" in inds else []) + (["macd"] if "MACD" in inds else [])
+    heights = {"price": 0.58, "volume": 0.14, "rsi": 0.16, "macd": 0.18}
+    hs = [heights[p] for p in panels]
+    fig = make_subplots(rows=len(panels), cols=1, shared_xaxes=True, vertical_spacing=0.03,
+                        row_heights=[h / sum(hs) for h in hs])
+
+    intraday = rng in S.INTRADAY
+    x = view.index.strftime("%d %b %H:%M") if intraday else view.index
+
+    if style == "Candles":
+        fig.add_trace(go.Candlestick(x=x, open=view["Open"], high=view["High"], low=view["Low"],
+                                     close=view["Close"], name=ticker,
+                                     increasing=dict(line=dict(color=UP), fillcolor=UP),
+                                     decreasing=dict(line=dict(color=DOWN), fillcolor=DOWN)),
+                      row=1, col=1)
+    else:
+        fig.add_trace(go.Scatter(x=x, y=view["Close"], name=ticker, line=dict(color="#2a78d6", width=2),
+                                 hovertemplate="%{y:,.2f}"), row=1, col=1)
+
+    if "Bollinger Bands" in inds:
+        up, mid, lo = (s.reindex(view.index) for s in S.bollinger(close))
+        fig.add_trace(go.Scatter(x=x, y=up, line=dict(color="rgba(128,128,128,.6)", width=1),
+                                 name="Bollinger Bands", legendgroup="bb",
+                                 hovertemplate="upper %{y:,.2f}"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x, y=lo, line=dict(color="rgba(128,128,128,.6)", width=1),
+                                 fill="tonexty", fillcolor="rgba(128,128,128,.10)",
+                                 name="Bollinger lower", legendgroup="bb", showlegend=False,
+                                 hovertemplate="%{y:,.2f}"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x, y=mid, line=dict(color="rgba(128,128,128,.8)", width=1, dash="dot"),
+                                 name="Bollinger middle", legendgroup="bb", showlegend=False,
+                                 hovertemplate="%{y:,.2f}"), row=1, col=1)
+    for name, series in ind.items():
+        fig.add_trace(go.Scatter(x=x, y=series.reindex(view.index), name=name,
+                                 line=dict(color=LINE_COLORS[name], width=1.5),
+                                 hovertemplate="%{y:,.2f}"), row=1, col=1)
+
+    row = 2
+    if show_vol:
+        colors = np.where(view["Close"] >= view["Open"], UP, DOWN)
+        fig.add_trace(go.Bar(x=x, y=view["Volume"], name="Volume", marker_color=colors,
+                             opacity=0.6, showlegend=False, hovertemplate="%{y:,.0f}"),
+                      row=row, col=1)
+        fig.update_yaxes(title_text="Volume", row=row, col=1)
+        row += 1
+    if "RSI" in inds:
+        r = S.rsi(close, 14).reindex(view.index)
+        fig.add_trace(go.Scatter(x=x, y=r, name="RSI 14", line=dict(color="#6250d6", width=1.5),
+                                 showlegend=False, hovertemplate="%{y:.0f}"), row=row, col=1)
+        panel_label(fig, row, "RSI 14 — above 70 overbought, below 30 oversold")
+        for lvl in (30, 70):
+            fig.add_hline(y=lvl, line=dict(color="gray", width=1, dash="dash"), row=row, col=1)
+        fig.update_yaxes(title_text="RSI", range=[0, 100], row=row, col=1)
+        row += 1
+    if "MACD" in inds:
+        line, sig, hist = (s.reindex(view.index) for s in S.macd(close))
+        fig.add_trace(go.Bar(x=x, y=hist, name="MACD histogram", opacity=0.5,
+                             marker_color=np.where(hist.fillna(0) >= 0, UP, DOWN),
+                             showlegend=False, hovertemplate="%{y:.3f}"), row=row, col=1)
+        fig.add_trace(go.Scatter(x=x, y=line, name="MACD", line=dict(color="#2a78d6", width=1.5),
+                                 showlegend=False, hovertemplate="%{y:.3f}"), row=row, col=1)
+        fig.add_trace(go.Scatter(x=x, y=sig, name="Signal", line=dict(color="#eb6834", width=1.5),
+                                 showlegend=False, hovertemplate="%{y:.3f}"), row=row, col=1)
+        panel_label(fig, row, "MACD (blue) vs signal (orange); bars = gap between them")
+        fig.update_yaxes(title_text="MACD", row=row, col=1)
+
+    fig.update_layout(height=420 + 130 * (len(panels) - 1), margin=dict(l=10, r=10, t=30, b=10),
+                      hovermode="x unified", xaxis_rangeslider_visible=False,
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+    fig.update_yaxes(gridcolor=GRID, zeroline=False)
+    fig.update_yaxes(title_text=f"Price ({cur})", row=1, col=1)
+    if intraday:
+        fig.update_xaxes(type="category", nticks=8, showgrid=False)
+    else:
+        fig.update_xaxes(showgrid=False,
+                         rangebreaks=[dict(bounds=["sat", "mon"])] if rng in ("3M", "6M", "1Y") else [])
+    st.plotly_chart(fig, width="stretch", key="tc_chart")
+
+    bar = S.CHART_RANGES[rng]["bar"]
+    st.caption(f"Each candle = {bar} of trading. Indicator periods count candles "
+               f"(e.g. SMA 50 = average of the last 50 candles). Prices are not dividend-adjusted."
+               + (" Yahoo's intraday prices can be delayed ~15 minutes." if intraday else ""))
+
+
 def default_benchmark(ticker: str) -> str:
     return "TDEX.BK" if ticker.upper().endswith(".BK") else "SPY"
 
@@ -371,8 +545,11 @@ order = sorted(results, key=lambda k: metrics[k]["Final value"], reverse=True)
 first, last = df.index[0].date(), df.index[-1].date()
 st.subheader(f"{ticker}  ·  {first:%d %b %Y} → {last:%d %b %Y}")
 
-tab_bt, tab_fc, tab_fund, tab_help = st.tabs(
-    ["📊 Backtest", "🔮 Forecast", "🔎 Fundamentals", "❓ How to read this"])
+tab_bt, tab_tc, tab_fc, tab_fund, tab_help = st.tabs(
+    ["📊 Backtest", "📉 Technical chart", "🔮 Forecast", "🔎 Fundamentals", "❓ How to read this"])
+
+with tab_tc:
+    technical_chart(ticker, df, uploaded is not None, cur)
 
 # ===========================================================================
 # BACKTEST TAB

@@ -114,8 +114,87 @@ def load_fundamentals(ticker: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 2. INDICATORS (small helpers the strategies use)
+# 1b. TECHNICAL-CHART DATA
+#     Each chart range uses a candle size that gives a readable number of candles.
+#     We download extra history ("fetch") so indicators like the 200-bar average
+#     are already valid at the left edge of the chart, then crop to "show".
 # ---------------------------------------------------------------------------
+
+CHART_RANGES = {
+    #  label   fetch   interval  candle label   how much to show
+    "1D":  dict(fetch="5d",   interval="5m",  bar="5 minutes", show="session"),
+    "7D":  dict(fetch="1mo",  interval="30m", bar="30 minutes", show=pd.DateOffset(days=7)),
+    "1M":  dict(fetch="6mo",  interval="1h",  bar="1 hour",    show=pd.DateOffset(months=1)),
+    "3M":  dict(fetch="2y",   interval="1d",  bar="1 day",     show=pd.DateOffset(months=3)),
+    "6M":  dict(fetch="2y",   interval="1d",  bar="1 day",     show=pd.DateOffset(months=6)),
+    "1Y":  dict(fetch="3y",   interval="1d",  bar="1 day",     show=pd.DateOffset(years=1)),
+    "5Y":  dict(fetch="10y",  interval="1wk", bar="1 week",    show=pd.DateOffset(years=5)),
+    "Max": dict(fetch="max",  interval="1wk", bar="1 week",    show=None),
+}
+INTRADAY = {"1D", "7D", "1M"}
+
+
+def load_ohlc(ticker: str, range_label: str) -> pd.DataFrame:
+    """Open/High/Low/Close/Volume candles from Yahoo for one chart range
+    (un-cropped, so indicators can warm up). Times are in the exchange's local time."""
+    import yfinance as yf
+
+    cfg = CHART_RANGES[range_label]
+    hist = yf.Ticker(ticker).history(period=cfg["fetch"], interval=cfg["interval"],
+                                     auto_adjust=False, actions=False)
+    if hist is None or hist.empty:
+        raise ValueError(f"No {cfg['interval']} price data for '{ticker}' right now.")
+    out = hist[["Open", "High", "Low", "Close", "Volume"]].copy()
+    if getattr(out.index, "tz", None) is not None:
+        out.index = out.index.tz_localize(None)  # keep exchange-local clock time
+    out = out[~out.index.duplicated(keep="last")].sort_index()
+    out = out.dropna(subset=["Open", "High", "Low", "Close"])
+    return out[(out["Close"] > 0)]
+
+
+def ohlc_from_closes(df: pd.DataFrame) -> pd.DataFrame:
+    """For uploaded CSVs (closing prices only): a simple daily table the chart can draw."""
+    c = df["close"]
+    return pd.DataFrame({"Open": c, "High": c, "Low": c, "Close": c, "Volume": np.nan})
+
+
+def crop_to_range(ohlc: pd.DataFrame, range_label: str) -> pd.DataFrame:
+    """Keep only the part of the (longer) download that the chosen range shows."""
+    show = CHART_RANGES[range_label]["show"]
+    if show is None or ohlc.empty:
+        return ohlc
+    last = ohlc.index[-1]
+    if isinstance(show, str):  # "session": 1D = the most recent trading day
+        return ohlc[ohlc.index.normalize() == last.normalize()]
+    return ohlc[ohlc.index > last - show]
+
+
+# ---------------------------------------------------------------------------
+# 2. INDICATORS (used by the strategies and the technical chart)
+# ---------------------------------------------------------------------------
+
+def sma(price: pd.Series, n: int) -> pd.Series:
+    """Simple moving average: plain average of the last n closes."""
+    return price.rolling(n, min_periods=n).mean()
+
+
+def ema(price: pd.Series, n: int) -> pd.Series:
+    """Exponential moving average: like SMA but recent prices count more."""
+    return price.ewm(span=n, adjust=False, min_periods=n).mean()
+
+
+def bollinger(price: pd.Series, n: int = 20, k: float = 2.0):
+    """Bollinger Bands: n-bar average ± k standard deviations."""
+    mid = sma(price, n)
+    sd = price.rolling(n, min_periods=n).std()
+    return mid + k * sd, mid, mid - k * sd
+
+
+def macd(price: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    """MACD line, signal line and histogram (the gap between them)."""
+    line = ema(price, fast) - ema(price, slow)
+    sig = line.ewm(span=signal, adjust=False, min_periods=signal).mean()
+    return line, sig, line - sig
 
 def rsi(price: pd.Series, period: int = 14) -> pd.Series:
     """Relative Strength Index (Wilder). Below 30 = 'oversold', above 70 = 'overbought'."""

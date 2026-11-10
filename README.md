@@ -69,6 +69,7 @@ The first start takes 2–5 minutes while it installs the libraries. After that,
 4. Press **Run simulation**.
 5. Look at the four tabs:
    - **📊 Backtest** — who won, how the money grew, the scorecard, the worst drops, and every buy/sell. Hover over (or tap) any coloured strategy label above the chart to see what it does and the exact rule used with your settings.
+   - **📉 Technical chart** — candlestick (or line) price chart. Pick the range — 1D, 7D, 1M, 3M, 6M, 1Y, 5Y or Max — and switch on indicators: volume, moving averages (SMA 20/50/200, EMA 20), Bollinger Bands, RSI and MACD. Hover the ⓘ next to *Indicators* for what each one means.
    - **🔮 Forecast** — a fan of possible futures plus your own bear / base / bull lines.
    - **🔎 Fundamentals** — today's P/E, P/B, ROE, dividend yield.
    - **❓ How to read this** — plain-English explanations of every number.
