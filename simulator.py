@@ -213,6 +213,52 @@ def sig_value(df: pd.DataFrame, p: dict) -> tuple[pd.Series, str]:
     return _state_machine(cheap.fillna(False), dear.fillna(False)), "price margin-of-safety rule"
 
 
+DIP_EXITS = {
+    "recover": "When it's back at the old high",
+    "target": "At a profit target",
+    "hold": "Never (keep holding)",
+}
+
+
+def sig_buy_dip(df: pd.DataFrame, p: dict) -> pd.Series:
+    """Buy the dip: buy once the price has fallen `dip_pct`% below its highest
+    price of the last `dip_lookback` trading days. Then exit by one of three rules:
+
+      recover - sell when the price climbs back to the high it fell from
+      target  - sell when the trade is up `dip_take_profit`%
+      hold    - never sell; just keep the shares
+    Optional `dip_stop` (%) sells if the price keeps falling that far below the buy price
+    (0 = no stop-loss). After a stop-loss it won't buy again until the price has bounced
+    back out of the dip zone, so it doesn't instantly re-buy the same falling stock.
+    """
+    px = df["adj_close"].to_numpy()
+    high = df["adj_close"].rolling(int(p["dip_lookback"]), min_periods=1).max().to_numpy()
+    dip = p["dip_pct"] / 100
+    tp = p["dip_take_profit"] / 100
+    stop = p.get("dip_stop", 0) / 100
+    mode = p["dip_exit"]
+
+    held, entry_px, ref_high = 0, 0.0, 0.0
+    armed = True  # after a stop-loss, wait for the price to bounce out of the dip zone
+    out = np.zeros(len(px))
+    for i in range(len(px)):
+        in_dip = px[i] <= high[i] * (1 - dip)
+        if held == 0:
+            if not armed and not in_dip:
+                armed = True
+            if armed and i >= 1 and in_dip:
+                held, entry_px, ref_high = 1, px[i], high[i]
+        else:
+            if stop > 0 and px[i] <= entry_px * (1 - stop):
+                held, armed = 0, False
+            elif mode == "recover" and px[i] >= ref_high:
+                held = 0
+            elif mode == "target" and px[i] >= entry_px * (1 + tp):
+                held = 0
+        out[i] = held
+    return pd.Series(out, index=df.index)
+
+
 @dataclass
 class StrategyInfo:
     key: str
@@ -229,6 +275,7 @@ STRATEGIES = [
     StrategyInfo("mean_rev", "Mean Reversion (RSI)", "Buy when oversold, sell when overbought.", "#e87ba4"),
     StrategyInfo("momentum", "Momentum Breakout", "Buy new highs, exit on a trailing stop-loss.", "#008300"),
     StrategyInfo("value", "Value Investing", "Buy when cheap vs. its own history, sell when expensive.", "#6250d6"),
+    StrategyInfo("dip", "Buy the Dip", "Buy after the price falls a set % from its recent high.", "#e34948"),
 ]
 STRATEGY_BY_KEY = {s.key: s for s in STRATEGIES}
 
@@ -238,6 +285,7 @@ DEFAULT_PARAMS = dict(
     rsi_period=14, rsi_buy=30, rsi_sell=70,
     breakout_days=50, trailing_stop=15,
     value_buy_pct=70, value_sell_pct=30, value_window=756, value_margin=15,
+    dip_pct=10, dip_lookback=252, dip_exit="recover", dip_take_profit=20, dip_stop=0,
 )
 
 
@@ -363,6 +411,8 @@ def run_all(df: pd.DataFrame, bench: pd.DataFrame | None, keys: list[str], start
         elif k == "value":
             sig, note = sig_value(df, params)
             out[k] = run_backtest(px, sig, start_cash, monthly, fee_pct, key=k, note=note)
+        elif k == "dip":
+            out[k] = run_backtest(px, sig_buy_dip(df, params), start_cash, monthly, fee_pct, key=k)
     return out
 
 

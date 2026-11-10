@@ -1,6 +1,6 @@
 # 📈 Investment Strategy Simulator
 
-Type a stock ticker → see how 7 investing strategies would have performed on it → see a range of possible futures.
+Type a stock ticker → see how 8 investing strategies would have performed on it → see a range of possible futures.
 
 Works with **Thai SET stocks** (add `.BK`, e.g. `PTT.BK`, `CPALL.BK`) and **US stocks/ETFs** (`AAPL`, `NVDA`, `SPY`).
 
@@ -65,10 +65,10 @@ The first start takes 2–5 minutes while it installs the libraries. After that,
 
 1. **Sidebar → Pick a stock.** Type the ticker. Thai stocks need `.BK` at the end.
 2. **Your money.** Starting amount, optional monthly top-up, your broker's fee %.
-3. **Strategies.** All 7 are selected by default. Open *Strategy settings* to tweak them.
+3. **Strategies.** All 8 are selected by default. With **Buy the Dip** selected, its settings appear right below the list: the drop % that triggers a buy, which recent high it's measured from, when to sell, and an optional stop-loss. Hover the ⓘ next to *Strategies* for a one-line summary of each, and open *Strategy settings* to tweak them.
 4. Press **Run simulation**.
 5. Look at the four tabs:
-   - **📊 Backtest** — who won, how the money grew, the scorecard, the worst drops, and every buy/sell.
+   - **📊 Backtest** — who won, how the money grew, the scorecard, the worst drops, and every buy/sell. Hover over (or tap) any coloured strategy label above the chart to see what it does and the exact rule used with your settings.
    - **🔮 Forecast** — a fan of possible futures plus your own bear / base / bull lines.
    - **🔎 Fundamentals** — today's P/E, P/B, ROE, dividend yield.
    - **❓ How to read this** — plain-English explanations of every number.
@@ -82,7 +82,7 @@ The first start takes 2–5 minutes while it installs the libraries. After that,
 | *"Yahoo Finance is limiting requests right now"* | Yahoo sometimes blocks shared cloud servers. Wait 10–30 minutes and try again — or use Option A or B below. |
 | *"No price data found"* | Check the ticker spelling. Thai stocks must end in `.BK`. Try the same symbol on finance.yahoo.com. |
 | App shows a red error box when starting | On share.streamlit.io, click your app → **Manage app** (bottom-right) to see the log. Most often a file was uploaded into a sub-folder instead of the top level. |
-| Passive Index is missing | The index symbol couldn't load. Try `^SET.BK` (Thai) or `SPY` (US), or another ETF symbol. |
+| Passive Index is missing or uses a different symbol | The app tries your index first, then backups automatically (Thai: `TDEX.BK` → `^SET.BK` → `^SET50.BK`; US: `SPY` → `VOO` → `^GSPC`). If all fail, the warning lists why — usually Yahoo limiting requests, so wait a few minutes and press Run again. |
 
 **Option A — Upload your own price file.** In the sidebar choose **Upload my own CSV**. Any CSV with a `Date` column and a `Close` (or `Price`) column works — for example a historical-data export from Investing.com or your broker. If it has an `Adj Close` column, dividends will be included automatically.
 

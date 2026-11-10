@@ -35,7 +35,162 @@ def get_fundamentals(ticker: str) -> dict:
 
 
 def default_benchmark(ticker: str) -> str:
-    return "^SET.BK" if ticker.upper().endswith(".BK") else "SPY"
+    return "TDEX.BK" if ticker.upper().endswith(".BK") else "SPY"
+
+
+# Backups tried in order if the chosen index can't be loaded
+BENCH_FALLBACKS = {
+    "thai": ["TDEX.BK", "^SET.BK", "^SET50.BK"],
+    "us": ["SPY", "VOO", "^GSPC"],
+}
+BENCH_NAMES = {
+    "TDEX.BK": "ThaiDEX SET50 ETF", "^SET.BK": "SET Index", "^SET50.BK": "SET50 Index",
+    "SPY": "S&P 500 ETF", "VOO": "Vanguard S&P 500 ETF", "^GSPC": "S&P 500 Index",
+}
+
+
+def _short_reason(err: Exception) -> str:
+    msg = str(err)
+    if "Rate" in msg or "Too Many" in msg or "429" in msg:
+        return "Yahoo is limiting requests"
+    if "No price data" in msg or "delisted" in msg or "Not enough" in msg:
+        return "no price history on Yahoo"
+    return msg[:80] or type(err).__name__
+
+
+def load_benchmark(symbol: str, stock: str, start: str, end: str):
+    """Try the chosen index, then sensible backups. Retries once if Yahoo is busy.
+    Returns (prices or None, symbol actually used, list of (symbol, reason) failures)."""
+    import time
+    market = "thai" if stock.endswith(".BK") else "us"
+    candidates = [symbol] + [s for s in BENCH_FALLBACKS[market] if s != symbol]
+    failures = []
+    for sym in candidates:
+        for attempt in range(2):
+            try:
+                return get_prices(sym, start, end), sym, failures
+            except Exception as e:  # noqa: BLE001
+                reason = _short_reason(e)
+                if reason.startswith("Yahoo is limiting") and attempt == 0:
+                    time.sleep(2)
+                    continue
+                failures.append((sym, reason))
+                break
+    return None, None, failures
+
+
+# ---------------------------------------------------------------------------
+# Strategy explanations (shown when you hover over a strategy name)
+# ---------------------------------------------------------------------------
+
+STRATEGY_GUIDE = {
+    "buy_hold": ("Put all the money in on day one and never sell.",
+                 "The simple baseline. If a clever strategy can't beat this after fees, "
+                 "it isn't worth the effort."),
+    "dca": ("Split the starting money into equal monthly purchases.",
+            "Lowers the regret of buying everything right before a fall. In a rising market "
+            "it usually trails Buy & Hold slightly because some cash waits on the sidelines."),
+    "index": ("Same money, but in the whole market instead of one stock.",
+              "Spreads risk over many companies. Tells you whether picking this stock was "
+              "better than simply owning the market."),
+    "trend": ("Own the stock only while its short-term average price is above its "
+              "long-term average.",
+              "Aims to ride long uptrends and step aside during long downtrends. Gets "
+              "whipsawed (many small losses) in sideways markets."),
+    "mean_rev": ("Buy after a sharp fall, sell after a sharp rise, using the RSI indicator.",
+                 "Bets that prices snap back toward normal. Works in range-bound stocks; can "
+                 "buy too early in a real crash."),
+    "momentum": ("Buy when the price breaks above its recent high; sell after a set drop "
+                 "from its peak.",
+                 "Bets that strength keeps going. The trailing stop limits losses but can "
+                 "sell on normal wobbles."),
+    "value": ("Buy when the stock looks cheap versus its own history; sell when it looks "
+              "expensive.",
+              "For dividend payers 'cheap' means an unusually high dividend yield. For "
+              "non-payers it means trading well below its 3-year average price."),
+    "dip": ("Buy once the price has fallen a set % below its recent high.",
+            "Bets that pullbacks in a good stock are buying chances. Works well in long "
+            "uptrends; in a stock that keeps falling it buys too early, so consider a stop-loss."),
+}
+
+
+def strategy_settings(key: str, P: dict, bench: str) -> str:
+    """One line describing the exact rule used with the current settings."""
+    return {
+        "buy_hold": "Buy on the first day, hold to the end.",
+        "dca": f"Starting amount split into {P['dca_months']} equal monthly buys.",
+        "index": f"Buy & hold {bench} with the same money.",
+        "trend": f"Hold while the {P['sma_fast']}-day average is above the "
+                 f"{P['sma_slow']}-day average; otherwise cash.",
+        "mean_rev": f"Buy when {P['rsi_period']}-day RSI < {P['rsi_buy']}; "
+                    f"sell when RSI > {P['rsi_sell']}.",
+        "momentum": f"Buy on a new {P['breakout_days']}-day high; sell after a "
+                    f"{P['trailing_stop']}% drop from the peak.",
+        "value": f"Dividend payers: buy when yield ≥ its {P['value_buy_pct']}th percentile, "
+                 f"sell when ≤ {P['value_sell_pct']}th. Non-payers: buy {P['value_margin']}% "
+                 "below the 3-year average, sell back at the average.",
+        "dip": dip_rule(P),
+    }[key]
+
+
+def dip_rule(P: dict) -> str:
+    lookback = {21: "1-month", 63: "3-month", 126: "6-month", 252: "1-year"}.get(
+        P["dip_lookback"], f"{P['dip_lookback']}-day")
+    rule = f"Buy when the price is {P['dip_pct']}% below its {lookback} high; "
+    rule += {"recover": "sell when it climbs back to that high.",
+             "target": f"sell once the trade is up {P['dip_take_profit']}%.",
+             "hold": "never sell after buying."}[P["dip_exit"]]
+    if P.get("dip_stop", 0) > 0:
+        rule += f" Stop-loss: sell if it falls {P['dip_stop']}% below the buy price."
+    return rule
+
+
+def strategy_tooltip(key: str, P: dict | None = None, bench: str = "") -> str:
+    what, why = STRATEGY_GUIDE[key]
+    text = f"{what} {why}"
+    if P is not None:
+        text += f" Rule used: {strategy_settings(key, P, bench)}"
+    return text
+
+
+SIDEBAR_HELP = "\n".join(
+    f"- **{s.name}** — {STRATEGY_GUIDE[s.key][0]}" for s in S.STRATEGIES)
+
+
+def strategy_chips(keys: list[str], P: dict, bench: str) -> str:
+    """Coloured strategy labels that show an explanation box on hover."""
+    from html import escape
+    chips = []
+    for k in keys:
+        info = S.STRATEGY_BY_KEY[k]
+        what, why = STRATEGY_GUIDE[k]
+        chips.append(
+            f'<span class="sg-chip" tabindex="0">'
+            f'<span class="sg-dot" style="background:{info.color}"></span>{escape(info.name)}'
+            f'<span class="sg-tip"><b>{escape(info.name)}</b><br>{escape(what)}'
+            f'<br><span class="sg-why">{escape(why)}</span>'
+            f'<br><span class="sg-rule">Rule used: {escape(strategy_settings(k, P, bench))}</span>'
+            f'</span></span>')
+    return f'<div class="sg-row">{"".join(chips)}</div>'
+
+
+CHIP_CSS = """
+<style>
+.sg-row{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 6px}
+.sg-chip{position:relative;display:inline-flex;align-items:center;gap:6px;padding:4px 10px;
+  border:1px solid rgba(128,128,128,.35);border-radius:999px;font-size:.85rem;cursor:help;
+  outline:none}
+.sg-chip:hover,.sg-chip:focus{border-color:rgba(128,128,128,.8)}
+.sg-dot{width:10px;height:10px;border-radius:50%;flex:none}
+.sg-tip{visibility:hidden;opacity:0;transition:opacity .12s;position:absolute;z-index:1000;
+  top:calc(100% + 8px);left:0;width:270px;max-width:calc(100vw - 48px);padding:10px 12px;border-radius:8px;
+  background:#1f1f1e;color:#f0efec;font-size:.8rem;line-height:1.45;font-weight:400;
+  box-shadow:0 6px 20px rgba(0,0,0,.25);pointer-events:none;white-space:normal}
+.sg-chip:hover .sg-tip,.sg-chip:focus .sg-tip{visibility:visible;opacity:1}
+.sg-why{color:#c3c2b7}
+.sg-rule{display:inline-block;margin-top:4px;color:#9fc4f0}
+</style>
+"""
 
 
 def money(x: float, cur: str) -> str:
@@ -90,14 +245,30 @@ with st.sidebar:
 
     st.header("3 · Strategies to compare")
     names = {s.name: s.key for s in S.STRATEGIES}
-    chosen_names = st.multiselect("Strategies", list(names), default=list(names))
+    chosen_names = st.multiselect("Strategies", list(names), default=list(names),
+                                  help="What each one does:\n\n" + SIDEBAR_HELP)
     chosen = [names[n] for n in chosen_names]
     bench_ticker = st.text_input("Index for 'Passive Index'", value=default_benchmark(ticker),
-                                 help="^SET.BK = Thai SET index (price only, excludes dividends). "
-                                      "SPY = S&P 500 ETF. You can type any ETF symbol.").strip().upper()
+                                 help="TDEX.BK = SET50 ETF (Thai, dividends included). SPY = S&P 500 ETF. "
+                                      "You can type any ETF or index symbol; if it fails, a backup is used automatically.").strip().upper()
+
+    P = dict(S.DEFAULT_PARAMS)
+    if "dip" in chosen:
+        st.markdown("**Buy the Dip settings**")
+        P["dip_pct"] = st.slider("Buy when the price drops this much (%)", 1, 60, P["dip_pct"],
+                                 help="Measured from the highest price within the window below.")
+        lookbacks = {"1 month": 21, "3 months": 63, "6 months": 126, "1 year": 252}
+        P["dip_lookback"] = lookbacks[st.select_slider(
+            "…below its highest price of the last", list(lookbacks), value="1 year")]
+        exits = {v: k for k, v in S.DIP_EXITS.items()}
+        P["dip_exit"] = exits[st.selectbox("When to sell", list(exits))]
+        if P["dip_exit"] == "target":
+            P["dip_take_profit"] = st.slider("Profit target (%)", 2, 100, P["dip_take_profit"])
+        P["dip_stop"] = st.slider("Stop-loss below buy price (%)", 0, 50, P["dip_stop"],
+                                  help="0 = no stop-loss. Protects against a dip that turns "
+                                       "into a long decline.")
 
     with st.expander("Strategy settings (optional)"):
-        P = dict(S.DEFAULT_PARAMS)
         P["dca_months"] = st.slider("DCA: spread starting amount over (months)", 2, 36, P["dca_months"])
         st.caption("Trend following")
         P["sma_fast"] = st.slider("Fast moving average (days)", 5, 150, P["sma_fast"])
@@ -170,10 +341,21 @@ if len(df) < 60:
 
 bench = None
 if "index" in chosen and uploaded is None:
-    try:
-        bench = get_prices(bench_ticker, str(df.index[0].date()), str(end + timedelta(days=1)))
-    except Exception:  # noqa: BLE001
-        st.warning(f"Couldn't load the index '{bench_ticker}', so Passive Index is skipped.")
+    bench, used, failed = load_benchmark(bench_ticker, ticker, str(df.index[0].date()),
+                                         str(end + timedelta(days=1)))
+    if bench is None:
+        tried = "; ".join(f"{s} ({why})" for s, why in failed)
+        st.warning(f"Passive Index is skipped — couldn't load any index. Tried: {tried}. "
+                   "If Yahoo is limiting requests, wait a few minutes and press Run again, "
+                   "or type a different ETF symbol in the sidebar.")
+    else:
+        if used != bench_ticker:
+            st.info(f"Couldn't load **{bench_ticker}** ({failed[0][1]}), so Passive Index uses "
+                    f"**{used}** ({BENCH_NAMES.get(used, 'backup index')}) instead.")
+        bench_ticker = used
+        if bench.index[0] > df.index[0] + pd.Timedelta(days=10):
+            st.caption(f"Note: {used} prices only start on {bench.index[0]:%d %b %Y}, so Passive "
+                       "Index stays flat until then.")
 elif "index" in chosen:
     st.info("Passive Index needs online data, so it's skipped when you upload a CSV.")
 
@@ -200,7 +382,8 @@ with tab_bt:
     bh = metrics.get("buy_hold")
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Best strategy", S.STRATEGY_BY_KEY[best].name,
-              f"{metrics[best]['Annual return % (CAGR)']:.1f}% a year")
+              f"{metrics[best]['Annual return % (CAGR)']:.1f}% a year",
+              help=strategy_tooltip(best, P, bench_ticker))
     k2.metric("Its final value", money(metrics[best]["Final value"], cur),
               f"{money(metrics[best]['Profit'], cur)} profit")
     if bh:
@@ -208,10 +391,14 @@ with tab_bt:
                   f"{bh['Annual return % (CAGR)']:.1f}% a year")
     safest = max(results, key=lambda k: metrics[k]["Max drawdown %"])
     k4.metric("Smallest worst-drop", S.STRATEGY_BY_KEY[safest].name,
-              f"{metrics[safest]['Max drawdown %']:.1f}%", delta_color="off")
+              f"{metrics[safest]['Max drawdown %']:.1f}%", delta_color="off",
+              help=strategy_tooltip(safest, P, bench_ticker))
 
     # --- growth of money chart
     st.markdown("#### How the money grew")
+    st.markdown(CHIP_CSS, unsafe_allow_html=True)
+    st.caption("Hover over (or tap) a strategy to see what it does.")
+    st.markdown(strategy_chips(order, P, bench_ticker), unsafe_allow_html=True)
     fig = go.Figure()
     for k in order:
         info = S.STRATEGY_BY_KEY[k]
@@ -225,21 +412,32 @@ with tab_bt:
 
     # --- scorecard table
     st.markdown("#### Scorecard")
-    table = pd.DataFrame({S.STRATEGY_BY_KEY[k].name: metrics[k] for k in order}).T
+    st.caption("Hover over a column title (like **Strategy** or **Sharpe ratio**) for an explanation.")
+    table = pd.DataFrame([metrics[k] for k in order])
+    table.insert(0, "Strategy", [S.STRATEGY_BY_KEY[k].name for k in order])
     st.dataframe(
-        table, width="stretch",
+        table, width="stretch", hide_index=True,
         column_config={
+            "Strategy": st.column_config.TextColumn(
+                help="\n".join(f"- **{S.STRATEGY_BY_KEY[k].name}** — {strategy_settings(k, P, bench_ticker)}"
+                               for k in order)),
             "Final value": st.column_config.NumberColumn(format=f"{cur}%,.0f"),
             "Money put in": st.column_config.NumberColumn(format=f"{cur}%,.0f"),
             "Profit": st.column_config.NumberColumn(format=f"{cur}%,.0f"),
             "Total return %": st.column_config.NumberColumn(format="%.1f%%"),
-            "Annual return % (CAGR)": st.column_config.NumberColumn(format="%.2f%%"),
-            "Volatility %": st.column_config.NumberColumn(format="%.1f%%"),
-            "Max drawdown %": st.column_config.NumberColumn(format="%.1f%%"),
-            "Sharpe ratio": st.column_config.NumberColumn(format="%.2f"),
-            "Time invested %": st.column_config.NumberColumn(format="%.0f%%"),
-            "Trades": st.column_config.NumberColumn(format="%d"),
-            "Win rate %": st.column_config.NumberColumn(format="%.0f%%"),
+            "Annual return % (CAGR)": st.column_config.NumberColumn(
+                format="%.2f%%", help="Steady yearly growth rate that gives the same end result."),
+            "Volatility %": st.column_config.NumberColumn(
+                format="%.1f%%", help="How bumpy the ride was."),
+            "Max drawdown %": st.column_config.NumberColumn(
+                format="%.1f%%", help="Worst fall from a previous peak."),
+            "Sharpe ratio": st.column_config.NumberColumn(
+                format="%.2f", help="Return per unit of risk, above the risk-free rate. Above 1 is good."),
+            "Time invested %": st.column_config.NumberColumn(
+                format="%.0f%%", help="How often it held the stock instead of cash."),
+            "Trades": st.column_config.NumberColumn(format="%d", help="Completed buy→sell round trips."),
+            "Win rate %": st.column_config.NumberColumn(
+                format="%.0f%%", help="Share of completed trades that made money."),
         },
     )
     if "value" in results:
@@ -264,7 +462,11 @@ with tab_bt:
     st.markdown("#### When each strategy bought and sold")
     active = [k for k in order if k not in ("buy_hold", "dca", "index")]
     if active:
-        pick = st.selectbox("Strategy", active, format_func=lambda k: S.STRATEGY_BY_KEY[k].name)
+        pick = st.selectbox("Strategy", active, format_func=lambda k: S.STRATEGY_BY_KEY[k].name,
+                            help="What each one does:\n\n" + "\n".join(
+                                f"- **{S.STRATEGY_BY_KEY[k].name}** — {STRATEGY_GUIDE[k][0]}"
+                                for k in active))
+        st.caption(f"**Rule used:** {strategy_settings(pick, P, bench_ticker)}")
         r = results[pick]
         px = df["adj_close"]
         fig = go.Figure()
@@ -435,6 +637,7 @@ with tab_help:
 | Trend Following | Own the stock only while its 50-day average price is above its 200-day average; otherwise sit in cash. |
 | Mean Reversion | Buy when the RSI says it's fallen too far too fast (below 30); sell when it's risen too far (above 70). |
 | Momentum Breakout | Buy when the price beats its highest level of the last 50 days; sell if it then drops 15% from its peak. |
+| Buy the Dip | Buy once the price falls your chosen % below its recent high (e.g. 10% below the 1-year high). Then sell when it recovers to that high, at a profit target, or never — your choice. An optional stop-loss limits losses if the dip keeps going. |
 | Value Investing | For dividend payers: buy when the dividend yield is high versus the stock's own history (price is cheap for the cash it pays) and sell when it's low. For non-payers: buy when the price is 15% below its 3-year average, sell when it recovers to the average. |
 
 **The scorecard**
