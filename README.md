@@ -67,9 +67,10 @@ The first start takes 2–5 minutes while it installs the libraries. After that,
 2. **Your money.** Starting amount, optional monthly top-up, your broker's fee %.
 3. **Strategies.** All 8 are selected by default. With **Buy the Dip** selected, its settings appear right below the list: the drop % that triggers a buy, which recent high it's measured from, when to sell, and an optional stop-loss. Hover the ⓘ next to *Strategies* for a one-line summary of each, and open *Strategy settings* to tweak them.
 4. Press **Run simulation**.
-5. Look at the four tabs:
+5. Look at the tabs:
+   - **🚦 Today's signal** — pick one of your strategies and see what it says at the latest price: **BUY**, **HOLD**, **SELL** or **STAY OUT**, the exact prices that would trigger its next buy or sell, and how often its past buy signals on this stock beat buying on a random day. A table at the bottom shows all your strategies at once. Press **🔄 Latest price** to re-download prices.
    - **📊 Backtest** — who won, how the money grew, the scorecard, the worst drops, and every buy/sell. Hover over (or tap) any coloured strategy label above the chart to see what it does and the exact rule used with your settings.
-   - **📉 Technical chart** — candlestick (or line) price chart. Pick the range — 1D, 7D, 1M, 3M, 6M, 1Y, 5Y or Max — and switch on indicators: volume, moving averages (SMA 20/50/200, EMA 20), Bollinger Bands, RSI and MACD. Hover the ⓘ next to *Indicators* for what each one means.
+   - **📉 Technical chart** — candlestick (or line) chart for 1D, 7D, 1M, 3M, 6M, 1Y, 5Y or Max. Open **⚙️ Indicators** to switch on and adjust: three moving averages (SMA or EMA, any period — default EMA 15/45/100), Bollinger Bands (period, width), RSI (period, overbought/oversold lines), MACD (fast/slow/signal), Stochastic (%K, smoothing, %D, levels) and volume with an average line.
    - **🔮 Forecast** — a fan of possible futures plus your own bear / base / bull lines.
    - **🔎 Fundamentals** — today's P/E, P/B, ROE, dividend yield.
    - **❓ How to read this** — plain-English explanations of every number.

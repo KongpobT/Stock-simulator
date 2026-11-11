@@ -44,19 +44,22 @@ def get_ohlc(ticker: str, rng: str) -> pd.DataFrame:
 # chart instead of re-running the whole backtest)
 # ---------------------------------------------------------------------------
 
-TECH_INDICATORS = ["Volume", "SMA 20", "SMA 50", "SMA 200", "EMA 20", "Bollinger Bands",
-                   "RSI", "MACD"]
-TECH_HELP = (
-    "- **Volume** — how many shares traded in each candle.\n"
-    "- **SMA** — simple moving average of the last N candles (20 = short, 200 = long trend).\n"
-    "- **EMA 20** — like SMA 20 but reacts faster to recent prices.\n"
-    "- **Bollinger Bands** — 20-candle average ± 2 standard deviations; price near the top band "
-    "is stretched high, near the bottom stretched low.\n"
-    "- **RSI** — momentum from 0–100; above 70 often called overbought, below 30 oversold.\n"
-    "- **MACD** — difference between a fast and slow average; lines crossing hint at a "
-    "change in trend.")
 UP, DOWN = "#1baf7a", "#e34948"
-LINE_COLORS = {"SMA 20": "#2a78d6", "SMA 50": "#eb6834", "SMA 200": "#6250d6", "EMA 20": "#eda100"}
+MA_COLORS = ["#eb6834", "#1baf7a", "#2a78d6"]
+IND_DEFAULTS = {
+    "ma1_on": True, "ma1_type": "EMA", "ma1_n": 15,
+    "ma2_on": True, "ma2_type": "EMA", "ma2_n": 45,
+    "ma3_on": True, "ma3_type": "EMA", "ma3_n": 100,
+    "bb_on": False, "bb_n": 20, "bb_k": 2.0,
+    "rsi_on": True, "rsi_n": 14, "rsi_hi": 70, "rsi_lo": 30,
+    "macd_on": True, "macd_f": 12, "macd_s": 26, "macd_sig": 9,
+    "sto_on": False, "sto_k": 14, "sto_smooth": 3, "sto_d": 3, "sto_hi": 80, "sto_lo": 20,
+    "vol_on": True, "vol_ma_on": False, "vol_ma_n": 20,
+}
+
+
+def _k(name: str) -> str:
+    return f"ind_{name}"
 
 
 def panel_label(fig: go.Figure, row: int, text: str) -> None:
@@ -64,6 +67,64 @@ def panel_label(fig: go.Figure, row: int, text: str) -> None:
     yref = "y domain" if row == 1 else f"y{row} domain"
     fig.add_annotation(text=text, xref="paper", yref=yref, x=0, y=1, xanchor="left",
                        yanchor="top", showarrow=False, font=dict(size=11, color="gray"))
+
+
+def indicator_settings() -> dict:
+    """On/off switches and numbers for every indicator. Values are remembered while
+    the app is open; 'Reset' puts back the defaults."""
+    for name, val in IND_DEFAULTS.items():
+        st.session_state.setdefault(_k(name), val)
+
+    with st.expander("⚙️ Indicators — switch on/off and adjust the settings", expanded=False):
+        t_ma, t_bb, t_rsi, t_macd, t_sto, t_vol = st.tabs(
+            ["Moving averages", "Bollinger Bands", "RSI", "MACD", "Stochastic", "Volume"])
+        with t_ma:
+            st.caption("Up to three lines. EMA reacts faster to recent prices than SMA. "
+                       "Periods count candles.")
+            for i in (1, 2, 3):
+                c1, c2, c3 = st.columns([1.2, 1, 1])
+                c1.checkbox(f"Line {i}", key=_k(f"ma{i}_on"))
+                c2.selectbox("Type", ["EMA", "SMA"], key=_k(f"ma{i}_type"),
+                             label_visibility="collapsed" if i > 1 else "visible")
+                c3.number_input("Period", 2, 400, key=_k(f"ma{i}_n"),
+                                label_visibility="collapsed" if i > 1 else "visible")
+        with t_bb:
+            st.checkbox("Show Bollinger Bands", key=_k("bb_on"))
+            c1, c2 = st.columns(2)
+            c1.number_input("Period", 2, 200, key=_k("bb_n"))
+            c2.number_input("Width (standard deviations)", 0.5, 4.0, step=0.5, key=_k("bb_k"))
+        with t_rsi:
+            st.checkbox("Show RSI", key=_k("rsi_on"))
+            c1, c2, c3 = st.columns(3)
+            c1.number_input("Period", 2, 100, key=_k("rsi_n"))
+            c2.number_input("Overbought line", 50, 95, key=_k("rsi_hi"))
+            c3.number_input("Oversold line", 5, 50, key=_k("rsi_lo"))
+        with t_macd:
+            st.checkbox("Show MACD", key=_k("macd_on"))
+            c1, c2, c3 = st.columns(3)
+            c1.number_input("Fast EMA", 2, 100, key=_k("macd_f"))
+            c2.number_input("Slow EMA", 3, 200, key=_k("macd_s"))
+            c3.number_input("Signal EMA", 2, 50, key=_k("macd_sig"))
+        with t_sto:
+            st.checkbox("Show Stochastic", key=_k("sto_on"),
+                        help="Where today's close sits inside the recent high–low range (0–100).")
+            c1, c2, c3 = st.columns(3)
+            c1.number_input("%K period", 2, 100, key=_k("sto_k"))
+            c2.number_input("%K smoothing", 1, 20, key=_k("sto_smooth"))
+            c3.number_input("%D period", 1, 20, key=_k("sto_d"))
+            c4, c5 = st.columns(2)
+            c4.number_input("Overbought line", 50, 95, key=_k("sto_hi"))
+            c5.number_input("Oversold line", 5, 50, key=_k("sto_lo"))
+        with t_vol:
+            st.checkbox("Show volume", key=_k("vol_on"))
+            c1, c2 = st.columns(2)
+            c1.checkbox("Add average volume line", key=_k("vol_ma_on"))
+            c2.number_input("Average over (candles)", 2, 200, key=_k("vol_ma_n"))
+        if st.button("Reset indicators to defaults", key="ind_reset"):
+            for name, val in IND_DEFAULTS.items():
+                st.session_state[_k(name)] = val
+            st.rerun(scope="fragment")
+    return {name: st.session_state[_k(name)] for name in IND_DEFAULTS}
 
 
 @st.fragment
@@ -75,8 +136,12 @@ def technical_chart(ticker: str, daily: pd.DataFrame, from_csv: bool, cur: str):
     style = c2.segmented_control("Style", ["Candles", "Line"], default="Candles", key="tc_style")
     rng = rng or "6M"
     style = style or "Candles"
-    inds = st.multiselect("Indicators", TECH_INDICATORS, default=["Volume", "SMA 50", "SMA 200"],
-                          key="tc_inds", help=TECH_HELP)
+    cfg = indicator_settings()
+    if cfg["macd_on"] and cfg["macd_f"] >= cfg["macd_s"]:
+        st.warning("MACD fast EMA must be shorter than the slow EMA — MACD is hidden until fixed.")
+        cfg["macd_on"] = False
+    if cfg["rsi_lo"] >= cfg["rsi_hi"] or cfg["sto_lo"] >= cfg["sto_hi"]:
+        st.warning("Oversold line must be below the overbought line.")
 
     # ---- data
     if from_csv:
@@ -115,18 +180,12 @@ def technical_chart(ticker: str, daily: pd.DataFrame, from_csv: bool, cur: str):
     vol = view["Volume"].sum()
     m4.metric(f"{rng} volume", f"{vol / 1e6:,.1f} M shares" if vol and not np.isnan(vol) else "–")
 
-    # ---- indicators on the full download, then cropped to the window
+    # ---- indicators are calculated on the full download, then cropped to the window
     close = full["Close"]
-    ind = {}
-    for n in (20, 50, 200):
-        if f"SMA {n}" in inds:
-            ind[f"SMA {n}"] = S.sma(close, n)
-    if "EMA 20" in inds:
-        ind["EMA 20"] = S.ema(close, 20)
-    show_vol = "Volume" in inds and view["Volume"].notna().any() and view["Volume"].sum() > 0
-    panels = ["price"] + (["volume"] if show_vol else []) + \
-             (["rsi"] if "RSI" in inds else []) + (["macd"] if "MACD" in inds else [])
-    heights = {"price": 0.58, "volume": 0.14, "rsi": 0.16, "macd": 0.18}
+    show_vol = cfg["vol_on"] and view["Volume"].notna().any() and view["Volume"].sum() > 0
+    panels = ["price"] + (["volume"] if show_vol else []) + (["rsi"] if cfg["rsi_on"] else []) \
+        + (["macd"] if cfg["macd_on"] else []) + (["sto"] if cfg["sto_on"] else [])
+    heights = {"price": 0.56, "volume": 0.13, "rsi": 0.16, "macd": 0.17, "sto": 0.16}
     hs = [heights[p] for p in panels]
     fig = make_subplots(rows=len(panels), cols=1, shared_xaxes=True, vertical_spacing=0.03,
                         row_heights=[h / sum(hs) for h in hs])
@@ -144,22 +203,25 @@ def technical_chart(ticker: str, daily: pd.DataFrame, from_csv: bool, cur: str):
         fig.add_trace(go.Scatter(x=x, y=view["Close"], name=ticker, line=dict(color="#2a78d6", width=2),
                                  hovertemplate="%{y:,.2f}"), row=1, col=1)
 
-    if "Bollinger Bands" in inds:
-        up, mid, lo = (s.reindex(view.index) for s in S.bollinger(close))
+    if cfg["bb_on"]:
+        up, mid, lo = (s.reindex(view.index) for s in S.bollinger(close, int(cfg["bb_n"]), float(cfg["bb_k"])))
+        name = f"Bollinger {cfg['bb_n']}, {cfg['bb_k']:g}"
         fig.add_trace(go.Scatter(x=x, y=up, line=dict(color="rgba(128,128,128,.6)", width=1),
-                                 name="Bollinger Bands", legendgroup="bb",
-                                 hovertemplate="upper %{y:,.2f}"), row=1, col=1)
+                                 name=name, legendgroup="bb", hovertemplate="upper %{y:,.2f}"),
+                      row=1, col=1)
         fig.add_trace(go.Scatter(x=x, y=lo, line=dict(color="rgba(128,128,128,.6)", width=1),
                                  fill="tonexty", fillcolor="rgba(128,128,128,.10)",
                                  name="Bollinger lower", legendgroup="bb", showlegend=False,
-                                 hovertemplate="%{y:,.2f}"), row=1, col=1)
+                                 hovertemplate="lower %{y:,.2f}"), row=1, col=1)
         fig.add_trace(go.Scatter(x=x, y=mid, line=dict(color="rgba(128,128,128,.8)", width=1, dash="dot"),
                                  name="Bollinger middle", legendgroup="bb", showlegend=False,
-                                 hovertemplate="%{y:,.2f}"), row=1, col=1)
-    for name, series in ind.items():
-        fig.add_trace(go.Scatter(x=x, y=series.reindex(view.index), name=name,
-                                 line=dict(color=LINE_COLORS[name], width=1.5),
-                                 hovertemplate="%{y:,.2f}"), row=1, col=1)
+                                 hovertemplate="mid %{y:,.2f}"), row=1, col=1)
+    for i in (1, 2, 3):
+        if cfg[f"ma{i}_on"]:
+            kind, n = cfg[f"ma{i}_type"], int(cfg[f"ma{i}_n"])
+            fig.add_trace(go.Scatter(x=x, y=S.moving_avg(close, n, kind).reindex(view.index),
+                                     name=f"{kind} {n}", line=dict(color=MA_COLORS[i - 1], width=1.5),
+                                     hovertemplate="%{y:,.2f}"), row=1, col=1)
 
     row = 2
     if show_vol:
@@ -167,28 +229,52 @@ def technical_chart(ticker: str, daily: pd.DataFrame, from_csv: bool, cur: str):
         fig.add_trace(go.Bar(x=x, y=view["Volume"], name="Volume", marker_color=colors,
                              opacity=0.6, showlegend=False, hovertemplate="%{y:,.0f}"),
                       row=row, col=1)
+        if cfg["vol_ma_on"]:
+            vma = full["Volume"].rolling(int(cfg["vol_ma_n"])).mean().reindex(view.index)
+            fig.add_trace(go.Scatter(x=x, y=vma, name=f"Avg volume {cfg['vol_ma_n']}", showlegend=False,
+                                     line=dict(color="#6250d6", width=1.5), hovertemplate="avg %{y:,.0f}"),
+                          row=row, col=1)
         fig.update_yaxes(title_text="Volume", row=row, col=1)
         row += 1
-    if "RSI" in inds:
-        r = S.rsi(close, 14).reindex(view.index)
-        fig.add_trace(go.Scatter(x=x, y=r, name="RSI 14", line=dict(color="#6250d6", width=1.5),
-                                 showlegend=False, hovertemplate="%{y:.0f}"), row=row, col=1)
-        panel_label(fig, row, "RSI 14 — above 70 overbought, below 30 oversold")
-        for lvl in (30, 70):
+    if cfg["rsi_on"]:
+        n, hi, lo = int(cfg["rsi_n"]), cfg["rsi_hi"], cfg["rsi_lo"]
+        r = S.rsi(close, n).reindex(view.index)
+        fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(98,80,214,.07)", line_width=0, row=row, col=1)
+        fig.add_trace(go.Scatter(x=x, y=r, name=f"RSI {n}", line=dict(color="#6250d6", width=1.5),
+                                 showlegend=False, hovertemplate="RSI %{y:.1f}"), row=row, col=1)
+        for lvl in (lo, hi):
             fig.add_hline(y=lvl, line=dict(color="gray", width=1, dash="dash"), row=row, col=1)
+        panel_label(fig, row, f"RSI {n} — above {hi} overbought, below {lo} oversold · now {r.iloc[-1]:.1f}")
         fig.update_yaxes(title_text="RSI", range=[0, 100], row=row, col=1)
         row += 1
-    if "MACD" in inds:
-        line, sig, hist = (s.reindex(view.index) for s in S.macd(close))
+    if cfg["macd_on"]:
+        f_, s_, g_ = int(cfg["macd_f"]), int(cfg["macd_s"]), int(cfg["macd_sig"])
+        line, sig, hist = (s.reindex(view.index) for s in S.macd(close, f_, s_, g_))
         fig.add_trace(go.Bar(x=x, y=hist, name="MACD histogram", opacity=0.5,
                              marker_color=np.where(hist.fillna(0) >= 0, UP, DOWN),
-                             showlegend=False, hovertemplate="%{y:.3f}"), row=row, col=1)
+                             showlegend=False, hovertemplate="hist %{y:.3f}"), row=row, col=1)
         fig.add_trace(go.Scatter(x=x, y=line, name="MACD", line=dict(color="#2a78d6", width=1.5),
-                                 showlegend=False, hovertemplate="%{y:.3f}"), row=row, col=1)
+                                 showlegend=False, hovertemplate="MACD %{y:.3f}"), row=row, col=1)
         fig.add_trace(go.Scatter(x=x, y=sig, name="Signal", line=dict(color="#eb6834", width=1.5),
-                                 showlegend=False, hovertemplate="%{y:.3f}"), row=row, col=1)
-        panel_label(fig, row, "MACD (blue) vs signal (orange); bars = gap between them")
+                                 showlegend=False, hovertemplate="signal %{y:.3f}"), row=row, col=1)
+        panel_label(fig, row, f"MACD {f_}/{s_}/{g_} — blue MACD vs orange signal; bars = gap")
         fig.update_yaxes(title_text="MACD", row=row, col=1)
+        row += 1
+    if cfg["sto_on"]:
+        kk, d_ = S.stochastic(full["High"], full["Low"], close, int(cfg["sto_k"]),
+                              int(cfg["sto_smooth"]), int(cfg["sto_d"]))
+        kk, d_ = kk.reindex(view.index), d_.reindex(view.index)
+        hi, lo = cfg["sto_hi"], cfg["sto_lo"]
+        fig.add_hrect(y0=lo, y1=hi, fillcolor="rgba(42,120,214,.06)", line_width=0, row=row, col=1)
+        fig.add_trace(go.Scatter(x=x, y=kk, name="%K", line=dict(color="#2a78d6", width=1.5),
+                                 showlegend=False, hovertemplate="%K %{y:.1f}"), row=row, col=1)
+        fig.add_trace(go.Scatter(x=x, y=d_, name="%D", line=dict(color="#eb6834", width=1.5),
+                                 showlegend=False, hovertemplate="%D %{y:.1f}"), row=row, col=1)
+        for lvl in (lo, hi):
+            fig.add_hline(y=lvl, line=dict(color="gray", width=1, dash="dash"), row=row, col=1)
+        panel_label(fig, row, f"Stochastic {cfg['sto_k']}/{cfg['sto_smooth']}/{cfg['sto_d']} — "
+                              f"blue %K vs orange %D")
+        fig.update_yaxes(title_text="Stoch", range=[0, 100], row=row, col=1)
 
     fig.update_layout(height=420 + 130 * (len(panels) - 1), margin=dict(l=10, r=10, t=30, b=10),
                       hovermode="x unified", xaxis_rangeslider_visible=False,
@@ -204,7 +290,7 @@ def technical_chart(ticker: str, daily: pd.DataFrame, from_csv: bool, cur: str):
 
     bar = S.CHART_RANGES[rng]["bar"]
     st.caption(f"Each candle = {bar} of trading. Indicator periods count candles "
-               f"(e.g. SMA 50 = average of the last 50 candles). Prices are not dividend-adjusted."
+               f"(e.g. EMA 45 = average of the last 45 candles). Prices are not dividend-adjusted."
                + (" Yahoo's intraday prices can be delayed ~15 minutes." if intraday else ""))
 
 
@@ -294,8 +380,8 @@ def strategy_settings(key: str, P: dict, bench: str) -> str:
         "buy_hold": "Buy on the first day, hold to the end.",
         "dca": f"Starting amount split into {P['dca_months']} equal monthly buys.",
         "index": f"Buy & hold {bench} with the same money.",
-        "trend": f"Hold while the {P['sma_fast']}-day average is above the "
-                 f"{P['sma_slow']}-day average; otherwise cash.",
+        "trend": f"Hold while the {P['sma_fast']}-day {P.get('ma_type', 'SMA')} is above the "
+                 f"{P['sma_slow']}-day {P.get('ma_type', 'SMA')}; otherwise cash.",
         "mean_rev": f"Buy when {P['rsi_period']}-day RSI < {P['rsi_buy']}; "
                     f"sell when RSI > {P['rsi_sell']}.",
         "momentum": f"Buy on a new {P['breakout_days']}-day high; sell after a "
@@ -365,6 +451,243 @@ CHIP_CSS = """
 .sg-rule{display:inline-block;margin-top:4px;color:#9fc4f0}
 </style>
 """
+
+
+# ---------------------------------------------------------------------------
+# Today's signal tab
+# ---------------------------------------------------------------------------
+
+ACTION_STYLE = {
+    "BUY": ("BUY", "#1baf7a"),
+    "HOLD": ("HOLD", "#2a78d6"),
+    "SELL": ("SELL", "#e34948"),
+    "WAIT": ("STAY OUT", "#8a8a85"),
+    "INVEST": ("INVEST", "#6250d6"),
+}
+ACTION_MEANING = {
+    "BUY": "The buy rule triggered at the latest close. The strategy would buy at the next session.",
+    "HOLD": "The strategy is already in the stock from an earlier buy signal and no sell rule has triggered.",
+    "SELL": "The sell rule triggered at the latest close. The strategy would sell at the next session.",
+    "WAIT": "No buy signal. The strategy would keep the money in cash for now.",
+    "INVEST": "A passive strategy — it invests regardless of the day's price.",
+}
+SIGNAL_CSS = """
+<style>
+.sig-card{border:1px solid rgba(128,128,128,.3);border-left:6px solid var(--c);border-radius:10px;
+  padding:16px 18px;margin:6px 0 12px;background:rgba(128,128,128,.04)}
+.sig-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.sig-badge{background:var(--c);color:#fff;font-weight:700;letter-spacing:.04em;padding:5px 12px;
+  border-radius:6px;font-size:1.05rem}
+.sig-head{font-size:1.15rem;font-weight:600}
+.sig-body{margin-top:8px;line-height:1.5;font-size:.95rem}
+.sig-muted{opacity:.75;font-size:.88rem}
+.sig-pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:.78rem;font-weight:600;
+  color:#fff;background:var(--c);margin-right:6px}
+</style>
+"""
+
+
+def _pct(x: float) -> str:
+    return "–" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x * 100:.0f}%"
+
+
+def _signal_verdict(tr: dict) -> tuple[str, str]:
+    """Plain-English judgement of whether past signals beat random timing."""
+    h = tr["horizons"]["3 months"]
+    if tr["n_signals"] < 5 or h["n"] < 5:
+        return ("info", f"Only {tr['n_signals']} past buy signal(s) in this period — too few to judge "
+                        "how reliable this signal is. Try a longer date range.")
+    better = h["hit"] - h["base_hit"]
+    avg_better = h["avg"] - h["base_avg"]
+    if better >= 0.05 and avg_better > 0:
+        return ("success", f"On this stock, this strategy's buy signals have beaten buying on a random "
+                           f"day: 3 months later the price was higher {_pct(h['hit'])} of the time vs "
+                           f"{_pct(h['base_hit'])} for a random day.")
+    if better <= -0.05 or avg_better < -0.02:
+        return ("warning", f"On this stock, this strategy's buy signals have done worse than buying on "
+                           f"a random day ({_pct(h['hit'])} vs {_pct(h['base_hit'])} higher 3 months "
+                           "later). Treat its signals with caution here.")
+    return ("info", f"On this stock, this strategy's buy signals have been about as good as buying on a "
+                    f"random day ({_pct(h['hit'])} vs {_pct(h['base_hit'])} higher 3 months later).")
+
+
+@st.fragment
+def signal_tab(ticker, df, bench, chosen, P, fee, cur, bench_ticker):
+    from plotly.subplots import make_subplots
+
+    st.markdown(SIGNAL_CSS, unsafe_allow_html=True)
+    last_date = df.index[-1]
+    c1, c2 = st.columns([4, 1])
+    c1.markdown(f"Prices up to **{last_date:%a %d %b %Y}** · last price **{df['close'].iloc[-1]:,.2f}**")
+    if c2.button("🔄 Latest price", help="Re-download prices now (they are otherwise reused for "
+                                         "up to an hour)."):
+        get_prices.clear()
+        st.rerun()
+    age = (pd.Timestamp(date.today()) - last_date.normalize()).days
+    if age > 4:
+        st.warning(f"These prices end on {last_date:%d %b %Y}, so this is the signal as of that day, "
+                   "not today. Set **To** in the sidebar to today and press Run.")
+    else:
+        st.caption("If the market is still open, the last price is still moving — a signal is only "
+                   "confirmed at the close.")
+
+    keys = [s.key for s in S.STRATEGIES if s.key in chosen and (s.key != "index" or bench is not None)]
+    if not keys:
+        st.info("Pick at least one strategy in the sidebar.")
+        return
+    active = [k for k in keys if k not in S.PASSIVE]
+    pick = st.selectbox("Check the signal for", keys, index=keys.index(active[0]) if active else 0,
+                        format_func=lambda k: S.STRATEGY_BY_KEY[k].name, key="sig_pick",
+                        help="Change this strategy's rules in the sidebar — the signal updates.")
+
+    data = bench if pick == "index" else df
+    sig = S.todays_signal(data, pick, P, bench)
+    label, color = ACTION_STYLE[sig["action"]]
+    extra = ""
+    if sig["since_date"] is not None and sig["action"] == "HOLD":
+        chg = (sig["last"] / sig["since_px"] - 1) * 100
+        days = (sig["date"] - sig["since_date"]).days
+        extra = (f"<div class='sig-body'>In the stock since <b>{sig['since_date']:%d %b %Y}</b> at "
+                 f"<b>{sig['since_px']:,.2f}</b> ({chg:+.1f}% since, {days} days). "
+                 f"<span class='sig-muted'>If you don't own it yet, buying now means entering "
+                 f"{abs(chg):.1f}% {'higher' if chg >= 0 else 'lower'} than the strategy did.</span></div>")
+    near = [lv for lv in sig["levels"] if lv["kind"] == "buy" and abs(lv["dist_pct"]) <= 3]
+    if sig["action"] == "WAIT" and near:
+        extra += (f"<div class='sig-body'>⚡ <b>Close to a buy signal</b> — the trigger is only "
+                  f"{abs(near[0]['dist_pct']):.1f}% away.</div>")
+    st.markdown(
+        f"<div class='sig-card' style='--c:{color}'><div class='sig-top'>"
+        f"<span class='sig-badge'>{label}</span><span class='sig-head'>{sig['headline']}</span></div>"
+        f"<div class='sig-body'>{sig['reason']}</div>{extra}"
+        f"<div class='sig-body sig-muted'>{ACTION_MEANING[sig['action']]} "
+        f"Rule: {strategy_settings(pick, P, bench_ticker)}</div></div>",
+        unsafe_allow_html=True)
+
+    # ---- prices to watch + readings
+    l, r = st.columns(2)
+    with l:
+        st.markdown("**Prices to watch** (next close)")
+        if sig["levels"]:
+            st.dataframe(pd.DataFrame([{"What": lv["label"], "Price": lv["price"],
+                                        "From now": lv["dist_pct"]} for lv in sig["levels"]]),
+                         hide_index=True, width="stretch",
+                         column_config={"Price": st.column_config.NumberColumn(format="%.2f"),
+                                        "From now": st.column_config.NumberColumn(format="%+.1f%%")})
+        else:
+            st.caption("No single price triggers this strategy's next action at the next close.")
+    with r:
+        st.markdown("**Indicator readings**")
+        st.dataframe(pd.DataFrame(sig["readings"], columns=["Reading", "Value"]),
+                     hide_index=True, width="stretch")
+
+    # ---- track record
+    st.markdown(f"#### How reliable has this signal been on {ticker if pick != 'index' else bench_ticker}?")
+    tr = S.signal_track_record(data, sig["position"], pick)
+    cols = st.columns(len(S.HORIZONS))
+    if pick in S.PASSIVE:
+        st.caption("Passive strategies don't time the market, so here's what buying on any day "
+                   "in this period led to.")
+        for col, (lbl, h) in zip(cols, tr["horizons"].items()):
+            col.metric(f"Bought any day → {lbl} later", f"higher {_pct(h['base_hit'])}")
+            col.caption(f"average change {h['base_avg'] * 100:+.1f}%")
+    else:
+        st.caption(f"{tr['n_signals']} buy signals in your date range. Each assumes buying at the next "
+                   "day's close, then measures the price change.")
+        for col, (lbl, h) in zip(cols, tr["horizons"].items()):
+            col.metric(f"After a buy signal → {lbl} later",
+                       f"higher {_pct(h['hit'])}" if h["n"] else "–",
+                       help=f"Based on {h['n']} signals.")
+            if h["n"]:
+                col.caption(f"avg {h['avg'] * 100:+.1f}% · any random day: higher "
+                            f"{_pct(h['base_hit'])}, avg {h['base_avg'] * 100:+.1f}%")
+        kind, msg = _signal_verdict(tr)
+        getattr(st, kind)(msg)
+        res = S.run_backtest(data["adj_close"], sig["position"], 100_000, 0, fee, key=pick)
+        t = res.trades
+        closed = t[t["Sold"] != "still holding"] if len(t) else t
+        if len(closed):
+            st.caption(f"Full trades using the strategy's own sell rule: {len(closed)} · won {(closed['Return %'] > 0).mean() * 100:.0f}% · "
+                       f"average {closed['Return %'].mean():+.1f}% per trade · average hold "
+                       f"{closed['Days held'].mean():.0f} days (after your {fee}% fee).")
+
+    # ---- chart: last year with signals, overlays and trigger lines
+    win = data.index[-1] - pd.DateOffset(years=1)
+    px = data["adj_close"][data.index > win]
+    pos = sig["position"].reindex(px.index)
+    with_rsi = pick == "mean_rev"
+    fig = make_subplots(rows=2 if with_rsi else 1, cols=1, shared_xaxes=True,
+                        vertical_spacing=0.04, row_heights=[0.72, 0.28] if with_rsi else [1])
+    fig.add_trace(go.Scatter(x=px.index, y=px, name="Price", line=dict(color="gray", width=1.5),
+                             hovertemplate="%{y:,.2f}"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=px.index, y=px.where(pos > 0), name="Strategy invested",
+                             line=dict(color=S.STRATEGY_BY_KEY[pick].color, width=2.5),
+                             hovertemplate="%{y:,.2f}"), row=1, col=1)
+    ov_colors = ["#eb6834", "#6250d6", "#1baf7a"]
+    for i, (name, series) in enumerate(sig["overlays"].items()):
+        if name == "RSI":
+            continue
+        fig.add_trace(go.Scatter(x=px.index, y=series.reindex(px.index), name=name,
+                                 line=dict(color=ov_colors[i % 3], width=1.2, dash="dot"),
+                                 hovertemplate="%{y:,.2f}"), row=1, col=1)
+    full_pos = sig["position"]
+    chg = full_pos.diff().reindex(px.index)
+    for mask, nm, sym, colr in [(chg > 0, "Buy signal", "triangle-up", "#1baf7a"),
+                                (chg < 0, "Sell signal", "triangle-down", "#e34948")]:
+        pts = px[mask.fillna(False)]
+        fig.add_trace(go.Scatter(x=pts.index, y=pts, mode="markers", name=nm,
+                                 marker=dict(symbol=sym, size=11, color=colr,
+                                             line=dict(width=1, color="white"))), row=1, col=1)
+    lvl_colors = {"buy": "#1baf7a", "sell": "#e34948", "stop": "#e34948", "neutral": "gray"}
+    for lv in sig["levels"]:
+        fig.add_hline(y=lv["price"], line=dict(color=lvl_colors[lv["kind"]], width=1.2, dash="dash"),
+                      annotation_text=f"{lv['label']}: {lv['price']:,.2f}",
+                      annotation_position="top left", annotation_font_size=11, row=1, col=1)
+    if with_rsi:
+        rr = sig["overlays"]["RSI"].reindex(px.index)
+        fig.add_trace(go.Scatter(x=px.index, y=rr, name="RSI", showlegend=False,
+                                 line=dict(color="#6250d6", width=1.5), hovertemplate="RSI %{y:.1f}"),
+                      row=2, col=1)
+        for v in (P["rsi_buy"], P["rsi_sell"]):
+            fig.add_hline(y=v, line=dict(color="gray", width=1, dash="dash"), row=2, col=1)
+        fig.update_yaxes(range=[0, 100], title_text="RSI", row=2, col=1)
+    fig = style_fig(fig, 470 if with_rsi else 400, f"Price ({cur})")
+    st.plotly_chart(fig, width="stretch", key="sig_chart")
+    st.caption("Last 12 months. Coloured line = periods the strategy would have been invested. "
+               "Signal prices use dividend-adjusted closes, so older highs can differ slightly "
+               "from your broker's chart.")
+
+    # ---- all strategies at a glance
+    st.markdown("#### All your strategies today")
+    rows, counts = [], {}
+    for k in keys:
+        d_ = bench if k == "index" else df
+        sg = S.todays_signal(d_, k, P, bench)
+        counts[sg["action"]] = counts.get(sg["action"], 0) + 1
+        nxt = sg["levels"][0] if sg["levels"] else None
+        trk = S.signal_track_record(d_, sg["position"], k)["horizons"]["3 months"]
+        rows.append({
+            "Strategy": S.STRATEGY_BY_KEY[k].name,
+            "Signal": ACTION_STYLE[sg["action"]][0],
+            "What it says": sg["headline"],
+            "Next trigger": f"{nxt['label']} {nxt['price']:,.2f}" if nxt else "–",
+            "From now": f"{nxt['dist_pct']:+.1f}%" if nxt else "–",
+            "Up 3M after signal": _pct(trk["hit"]) if k not in S.PASSIVE and trk["n"] else "–",
+            "Up 3M, any day": _pct(trk["base_hit"]),
+        })
+    pills = " ".join(f"<span class='sig-pill' style='--c:{ACTION_STYLE[a_][1]}'>"
+                     f"{counts[a_]} × {ACTION_STYLE[a_][0]}</span>"
+                     for a_ in ["BUY", "HOLD", "SELL", "WAIT", "INVEST"] if a_ in counts)
+    st.markdown(pills, unsafe_allow_html=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={
+        "What it says": st.column_config.TextColumn(width="medium"),
+        "Up 3M after signal": st.column_config.TextColumn(
+            help="How often the price was higher 3 months after this strategy's past buy signals."),
+        "Up 3M, any day": st.column_config.TextColumn(
+            help="How often the price was higher 3 months after any day — the bar a good signal "
+                 "should beat."),
+    })
+    st.caption("This applies your chosen rules mechanically. It can't see news, earnings or the "
+               "wider market, and past signal quality doesn't guarantee future results.")
 
 
 def money(x: float, cur: str) -> str:
@@ -445,6 +768,8 @@ with st.sidebar:
     with st.expander("Strategy settings (optional)"):
         P["dca_months"] = st.slider("DCA: spread starting amount over (months)", 2, 36, P["dca_months"])
         st.caption("Trend following")
+        P["ma_type"] = st.radio("Average type", ["SMA", "EMA"], horizontal=True,
+                                help="EMA reacts faster to recent prices than SMA.")
         P["sma_fast"] = st.slider("Fast moving average (days)", 5, 150, P["sma_fast"])
         P["sma_slow"] = st.slider("Slow moving average (days)", 20, 300, P["sma_slow"])
         st.caption("Mean reversion")
@@ -545,8 +870,12 @@ order = sorted(results, key=lambda k: metrics[k]["Final value"], reverse=True)
 first, last = df.index[0].date(), df.index[-1].date()
 st.subheader(f"{ticker}  ·  {first:%d %b %Y} → {last:%d %b %Y}")
 
-tab_bt, tab_tc, tab_fc, tab_fund, tab_help = st.tabs(
-    ["📊 Backtest", "📉 Technical chart", "🔮 Forecast", "🔎 Fundamentals", "❓ How to read this"])
+tab_sig, tab_bt, tab_tc, tab_fc, tab_fund, tab_help = st.tabs(
+    ["🚦 Today's signal", "📊 Backtest", "📉 Technical chart", "🔮 Forecast", "🔎 Fundamentals",
+     "❓ How to read this"])
+
+with tab_sig:
+    signal_tab(ticker, df, bench, chosen, P, fee, cur, bench_ticker)
 
 with tab_tc:
     technical_chart(ticker, df, uploaded is not None, cur)
@@ -816,6 +1145,14 @@ with tab_help:
 | Momentum Breakout | Buy when the price beats its highest level of the last 50 days; sell if it then drops 15% from its peak. |
 | Buy the Dip | Buy once the price falls your chosen % below its recent high (e.g. 10% below the 1-year high). Then sell when it recovers to that high, at a profit target, or never — your choice. An optional stop-loss limits losses if the dip keeps going. |
 | Value Investing | For dividend payers: buy when the dividend yield is high versus the stock's own history (price is cheap for the cash it pays) and sell when it's low. For non-payers: buy when the price is 15% below its 3-year average, sell when it recovers to the average. |
+
+**Today's signal**
+
+- **BUY / SELL** — the strategy's rule triggered at the latest close; it would act at the next session.
+- **HOLD** — it's already in from an earlier buy signal. The card shows when, and how far the price has moved since.
+- **STAY OUT** — no buy signal; it would keep the money in cash.
+- **Prices to watch** — the closing price that would trigger its next buy or sell (calculated exactly from the rule).
+- **How reliable** — after past buy signals, how often the price was higher 1, 3 and 6 months later, compared with buying on any random day. A signal is only useful if it beats the random day.
 
 **The scorecard**
 

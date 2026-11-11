@@ -190,6 +190,16 @@ def bollinger(price: pd.Series, n: int = 20, k: float = 2.0):
     return mid + k * sd, mid, mid - k * sd
 
 
+def stochastic(high: pd.Series, low: pd.Series, close: pd.Series, k: int = 14,
+               smooth: int = 3, d: int = 3):
+    """Stochastic oscillator: where the close sits in the recent high–low range (0–100)."""
+    ll = low.rolling(k, min_periods=k).min()
+    hh = high.rolling(k, min_periods=k).max()
+    raw = 100 * (close - ll) / (hh - ll).replace(0, np.nan)
+    k_line = raw.rolling(smooth, min_periods=smooth).mean()
+    return k_line, k_line.rolling(d, min_periods=d).mean()
+
+
 def macd(price: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
     """MACD line, signal line and histogram (the gap between them)."""
     line = ema(price, fast) - ema(price, slow)
@@ -236,11 +246,16 @@ def sig_always_in(df: pd.DataFrame, p: dict) -> pd.Series:
     return pd.Series(1.0, index=df.index)
 
 
+def moving_avg(price: pd.Series, n: int, kind: str = "SMA") -> pd.Series:
+    return ema(price, n) if kind == "EMA" else sma(price, n)
+
+
 def sig_trend(df: pd.DataFrame, p: dict) -> pd.Series:
     """Moving-average crossover: own the stock while the fast average is above the slow one."""
     px = df["adj_close"]
-    fast = px.rolling(p["sma_fast"]).mean()
-    slow = px.rolling(p["sma_slow"]).mean()
+    kind = p.get("ma_type", "SMA")
+    fast = moving_avg(px, p["sma_fast"], kind)
+    slow = moving_avg(px, p["sma_slow"], kind)
     return (fast > slow).astype(float)
 
 
@@ -250,8 +265,7 @@ def sig_mean_reversion(df: pd.DataFrame, p: dict) -> pd.Series:
     return _state_machine(r < p["rsi_buy"], r > p["rsi_sell"])
 
 
-def sig_momentum(df: pd.DataFrame, p: dict) -> pd.Series:
-    """Breakout: buy when price makes a new N-day high; sell if it falls X% from its peak since buying."""
+def _momentum_run(df: pd.DataFrame, p: dict):
     px = df["adj_close"].to_numpy()
     prior_high = df["adj_close"].rolling(p["breakout_days"]).max().shift(1).to_numpy()
     stop = p["trailing_stop"] / 100
@@ -265,7 +279,12 @@ def sig_momentum(df: pd.DataFrame, p: dict) -> pd.Series:
             if px[i] < peak * (1 - stop):
                 held = 0
         out[i] = held
-    return pd.Series(out, index=df.index)
+    return pd.Series(out, index=df.index), {"peak": peak}
+
+
+def sig_momentum(df: pd.DataFrame, p: dict) -> pd.Series:
+    """Breakout: buy when price makes a new N-day high; sell if it falls X% from its peak since buying."""
+    return _momentum_run(df, p)[0]
 
 
 def sig_value(df: pd.DataFrame, p: dict) -> tuple[pd.Series, str]:
@@ -310,6 +329,10 @@ def sig_buy_dip(df: pd.DataFrame, p: dict) -> pd.Series:
     (0 = no stop-loss). After a stop-loss it won't buy again until the price has bounced
     back out of the dip zone, so it doesn't instantly re-buy the same falling stock.
     """
+    return _dip_run(df, p)[0]
+
+
+def _dip_run(df: pd.DataFrame, p: dict):
     px = df["adj_close"].to_numpy()
     high = df["adj_close"].rolling(int(p["dip_lookback"]), min_periods=1).max().to_numpy()
     dip = p["dip_pct"] / 100
@@ -335,7 +358,8 @@ def sig_buy_dip(df: pd.DataFrame, p: dict) -> pd.Series:
             elif mode == "target" and px[i] >= entry_px * (1 + tp):
                 held = 0
         out[i] = held
-    return pd.Series(out, index=df.index)
+    return pd.Series(out, index=df.index), {"entry_px": entry_px, "ref_high": ref_high,
+                                            "armed": armed, "high": high[-1]}
 
 
 @dataclass
@@ -360,7 +384,7 @@ STRATEGY_BY_KEY = {s.key: s for s in STRATEGIES}
 
 DEFAULT_PARAMS = dict(
     dca_months=12,
-    sma_fast=50, sma_slow=200,
+    sma_fast=50, sma_slow=200, ma_type="SMA",
     rsi_period=14, rsi_buy=30, rsi_sell=70,
     breakout_days=50, trailing_stop=15,
     value_buy_pct=70, value_sell_pct=30, value_window=756, value_margin=15,
@@ -601,3 +625,301 @@ def scenario_path(amount: float, monthly: float, years: float, annual_pct: float
     for d in range(n_days):
         v[d + 1] = v[d] * daily + (monthly if (d + 1) % 21 == 0 else 0)
     return v
+
+
+# ---------------------------------------------------------------------------
+# 7. TODAY'S SIGNAL
+#    Applies a strategy to the latest price and explains what it says, which
+#    prices would trigger its next action, and how its past signals worked out.
+# ---------------------------------------------------------------------------
+
+PASSIVE = {"buy_hold", "dca", "index"}
+HORIZONS = {"1 month": 21, "3 months": 63, "6 months": 126}
+
+
+def strategy_position(df: pd.DataFrame, key: str, p: dict) -> pd.Series:
+    """1 = the strategy wants to own the stock at that day's close, 0 = cash."""
+    if key in PASSIVE:
+        return sig_always_in(df, p)
+    if key == "trend":
+        return sig_trend(df, p)
+    if key == "mean_rev":
+        return sig_mean_reversion(df, p)
+    if key == "momentum":
+        return sig_momentum(df, p)
+    if key == "value":
+        return sig_value(df, p)[0]
+    if key == "dip":
+        return sig_buy_dip(df, p)
+    raise KeyError(key)
+
+
+def _ma_cross_price(px: np.ndarray, fast: float, slow: float, nf: int, ns: int, kind: str):
+    """Closing price tomorrow at which the fast average would equal the slow one."""
+    if kind == "EMA":
+        af, a_s = 2 / (nf + 1), 2 / (ns + 1)
+        return ((1 - a_s) * slow - (1 - af) * fast) / (af - a_s)
+    if len(px) < ns:
+        return np.nan
+    out_f, out_s = px[-nf], px[-ns]  # prices that drop out of each window tomorrow
+    return (slow - fast + out_f / nf - out_s / ns) / (1 / nf - 1 / ns)
+
+
+def _rsi_trigger_price(price: pd.Series, n: int, level: float, direction: str) -> float:
+    """Closing price tomorrow that would push RSI below (direction='down') or above ('up') level."""
+    delta = price.diff()
+    ag = float(delta.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean().iloc[-1])
+    al = float((-delta.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean().iloc[-1])
+    rs = level / (100 - level)
+    last = float(price.iloc[-1])
+    if direction == "down":
+        return last - max((n - 1) * (ag / rs - al), 0.0)
+    return last + max((n - 1) * (rs * al - ag), 0.0)
+
+
+def _level(label: str, price: float, kind: str, note: str = "") -> dict:
+    return {"label": label, "price": float(price), "kind": kind, "note": note}
+
+
+def todays_signal(df: pd.DataFrame, key: str, p: dict, bench: pd.DataFrame | None = None) -> dict:
+    """What the strategy says at the latest close.
+
+    action:  BUY  (fresh buy signal today)    HOLD (already in since an earlier signal)
+             SELL (fresh sell signal today)   WAIT (out of the stock, no buy signal)
+             INVEST (passive strategies — always invested, timing doesn't matter)
+    """
+    px = df["adj_close"]
+    last = float(px.iloc[-1])
+    pos = strategy_position(df, key, p)
+    now, prev = int(pos.iloc[-1]), int(pos.iloc[-2]) if len(pos) > 1 else 0
+    levels, readings, overlays = [], [], {}
+    since_date = since_px = None
+
+    if key in PASSIVE:
+        action = "INVEST"
+    elif now and not prev:
+        action = "BUY"
+    elif now:
+        action = "HOLD"
+    elif prev:
+        action = "SELL"
+    else:
+        action = "WAIT"
+
+    if now and key not in PASSIVE:
+        starts = pos.index[(pos.diff() > 0) | ((pos > 0) & (pos.index == pos.index[0]))]
+        since_date = starts[-1]
+        since_px = float(px.loc[since_date])
+
+    # --- common readings
+    hi52 = float(px.iloc[-TRADING_DAYS:].max())
+    lo52 = float(px.iloc[-TRADING_DAYS:].min())
+    ma200 = float(px.rolling(200).mean().iloc[-1]) if len(px) >= 200 else np.nan
+
+    if key in PASSIVE:
+        what = {"buy_hold": "Buy & Hold invests regardless of price — it never waits for a signal.",
+                "dca": "DCA buys a fixed amount every month regardless of price — this month's "
+                       "instalment is due as normal.",
+                "index": "Passive Index buys the whole market instead of this stock."}[key]
+        headline = {"buy_hold": "Always invested", "dca": "Buy this month's instalment",
+                    "index": "Invest in the index"}[key]
+        reason = what
+        readings += [("Price vs 52-week high", f"{(last / hi52 - 1) * 100:+.1f}%"),
+                     ("Price vs 52-week low", f"{(last / lo52 - 1) * 100:+.1f}%")]
+        if not np.isnan(ma200):
+            readings.append(("Price vs 200-day average", f"{(last / ma200 - 1) * 100:+.1f}%"))
+        if key == "index" and bench is not None and len(bench):
+            b = bench["adj_close"]
+            readings.append(("Index vs its 52-week high",
+                             f"{(float(b.iloc[-1]) / float(b.iloc[-TRADING_DAYS:].max()) - 1) * 100:+.1f}%"))
+
+    elif key == "trend":
+        kind = p.get("ma_type", "SMA")
+        nf, ns = int(p["sma_fast"]), int(p["sma_slow"])
+        f_s, s_s = moving_avg(px, nf, kind), moving_avg(px, ns, kind)
+        fast, slow = float(f_s.iloc[-1]), float(s_s.iloc[-1])
+        overlays = {f"{kind} {nf}": f_s, f"{kind} {ns}": s_s}
+        gap = (fast / slow - 1) * 100
+        readings += [(f"{kind} {nf} (fast)", f"{fast:,.2f}"), (f"{kind} {ns} (slow)", f"{slow:,.2f}"),
+                     ("Fast vs slow", f"{gap:+.2f}%")]
+        cross = _ma_cross_price(px.to_numpy(), fast, slow, nf, ns, kind)
+        reachable = np.isfinite(cross) and 0 < cross < last * 3
+        if now:
+            headline = "Uptrend — fast average is above the slow one"
+            reason = (f"The {nf}-day {kind} ({fast:,.2f}) is {gap:.1f}% above the {ns}-day {kind} "
+                      f"({slow:,.2f}).")
+            if reachable and cross < last:
+                levels.append(_level("Sell if it closes below", cross, "sell",
+                                     "averages would cross down at the next close"))
+        else:
+            headline = "Downtrend — fast average is below the slow one"
+            reason = (f"The {nf}-day {kind} ({fast:,.2f}) is {abs(gap):.1f}% below the {ns}-day "
+                      f"{kind} ({slow:,.2f}).")
+            if reachable and cross > last:
+                levels.append(_level("Buy if it closes above", cross, "buy",
+                                     "averages would cross up at the next close"))
+        if not levels:
+            reason += (f" The averages are too far apart for one day's price to flip them — "
+                       f"it would take several days of {'gains' if not now else 'losses'}.")
+        if action == "SELL":
+            headline = "Sell signal — fast average just crossed below the slow one"
+        if action == "BUY":
+            headline = "Buy signal — fast average just crossed above the slow one"
+
+    elif key == "mean_rev":
+        n = int(p["rsi_period"])
+        r_s = rsi(px, n)
+        r = float(r_s.iloc[-1])
+        overlays = {"RSI": r_s}
+        readings += [(f"RSI {n}", f"{r:.1f}"), ("Buy below", f"{p['rsi_buy']}"),
+                     ("Sell above", f"{p['rsi_sell']}")]
+        if now:
+            headline = f"Holding — waiting for RSI to rise above {p['rsi_sell']}"
+            reason = f"RSI is {r:.0f}. The strategy sells once the stock becomes overbought."
+            levels.append(_level(f"Sell if it closes above (RSI > {p['rsi_sell']})",
+                                 _rsi_trigger_price(px, n, p["rsi_sell"], "up"), "sell"))
+        else:
+            headline = f"No buy — RSI {r:.0f} is not below {p['rsi_buy']}"
+            reason = "The strategy only buys when the stock has fallen hard enough to look oversold."
+            levels.append(_level(f"Buy if it closes below (RSI < {p['rsi_buy']})",
+                                 _rsi_trigger_price(px, n, p["rsi_buy"], "down"), "buy"))
+        if action == "BUY":
+            headline = f"Buy signal — RSI {r:.0f} fell below {p['rsi_buy']} (oversold)"
+        if action == "SELL":
+            headline = f"Sell signal — RSI {r:.0f} rose above {p['rsi_sell']} (overbought)"
+
+    elif key == "momentum":
+        n = int(p["breakout_days"])
+        _, st_ = _momentum_run(df, p)
+        hi_n = float(px.iloc[-n:].max())
+        overlays = {f"{n}-day high": px.rolling(n).max()}
+        readings += [(f"{n}-day high", f"{hi_n:,.2f}"),
+                     ("Price vs that high", f"{(last / hi_n - 1) * 100:+.1f}%")]
+        if now:
+            stop_px = st_["peak"] * (1 - p["trailing_stop"] / 100)
+            headline = "Holding — riding the breakout"
+            reason = (f"Peak since buying is {st_['peak']:,.2f}. The trailing stop sells if the price "
+                      f"falls {p['trailing_stop']}% from that peak.")
+            readings.append(("Peak since buying", f"{st_['peak']:,.2f}"))
+            levels.append(_level("Sell if it closes below (trailing stop)", stop_px, "sell"))
+        else:
+            headline = f"No breakout — price is below its {n}-day high"
+            reason = f"The strategy buys only when the price closes above its highest close of the last {n} days."
+            levels.append(_level(f"Buy if it closes above ({n}-day high)", hi_n, "buy"))
+        if action == "BUY":
+            headline = f"Buy signal — price broke above its {n}-day high"
+        if action == "SELL":
+            headline = "Sell signal — price fell through the trailing stop"
+
+    elif key == "value":
+        _, mode = sig_value(df, p)
+        if mode.startswith("dividend"):
+            y = trailing_dividend_yield(df)
+            hist = y.where(df.index >= df.index[0] + pd.Timedelta(days=365)).dropna()
+            ttm_div = float(df["dividends"].rolling("365D").sum().iloc[-1])
+            y_now = float(y.iloc[-1])
+            y_buy = float(hist.quantile(p["value_buy_pct"] / 100)) if len(hist) else np.nan
+            y_sell = float(hist.quantile(p["value_sell_pct"] / 100)) if len(hist) else np.nan
+            readings += [("Dividend yield (12 months)", f"{y_now * 100:.2f}%"),
+                         (f"'Cheap' yield ({p['value_buy_pct']}th pct)", f"{y_buy * 100:.2f}%"),
+                         (f"'Expensive' yield ({p['value_sell_pct']}th pct)", f"{y_sell * 100:.2f}%")]
+            if ttm_div > 0 and y_buy > 0:
+                if now:
+                    levels.append(_level("Sell at or above", last * y_now / y_sell, "sell",
+                                         "yield would drop to the 'expensive' level"))
+                else:
+                    levels.append(_level("Buy at or below", last * y_now / y_buy, "buy",
+                                         "yield would rise to the 'cheap' level"))
+            fair_txt = "dividend yield versus its own history"
+        else:
+            fair_s = px.rolling(p["value_window"], min_periods=TRADING_DAYS).mean()
+            fair = float(fair_s.iloc[-1])
+            overlays = {"3-year average": fair_s}
+            readings += [("3-year average price", f"{fair:,.2f}"),
+                         ("Price vs average", f"{(last / fair - 1) * 100:+.1f}%")]
+            if now:
+                levels.append(_level("Sell at or above (back to average)", fair, "sell"))
+            else:
+                levels.append(_level(f"Buy at or below ({p['value_margin']}% under average)",
+                                     fair * (1 - p["value_margin"] / 100), "buy"))
+            fair_txt = "price versus its 3-year average"
+        headline = ("Holding — still cheap enough to own" if now
+                    else "Not cheap enough yet to buy")
+        reason = f"Uses the {mode} ({fair_txt})."
+        if action == "BUY":
+            headline = "Buy signal — the stock just became 'cheap' versus its own history"
+        if action == "SELL":
+            headline = "Sell signal — the stock now looks 'expensive' versus its own history"
+
+    elif key == "dip":
+        _, st_ = _dip_run(df, p)
+        lb = int(p["dip_lookback"])
+        high = st_["high"]
+        overlays = {"Recent high": px.rolling(lb, min_periods=1).max(),
+                    f"Buy zone (−{p['dip_pct']}%)": px.rolling(lb, min_periods=1).max() * (1 - p["dip_pct"] / 100)}
+        readings += [("Recent high", f"{high:,.2f}"),
+                     ("Price vs recent high", f"{(last / high - 1) * 100:+.1f}%"),
+                     ("Dip needed to buy", f"−{p['dip_pct']}%")]
+        if now:
+            headline = "Holding a dip you bought"
+            reason = f"Bought at {st_['entry_px']:,.2f} after a {p['dip_pct']}% fall from {st_['ref_high']:,.2f}."
+            if p["dip_exit"] == "recover":
+                levels.append(_level("Sell at or above (back at old high)", st_["ref_high"], "sell"))
+            elif p["dip_exit"] == "target":
+                levels.append(_level(f"Sell at or above (+{p['dip_take_profit']}% target)",
+                                     st_["entry_px"] * (1 + p["dip_take_profit"] / 100), "sell"))
+            if p.get("dip_stop", 0) > 0:
+                levels.append(_level(f"Stop-loss (−{p['dip_stop']}%)",
+                                     st_["entry_px"] * (1 - p["dip_stop"] / 100), "stop"))
+        else:
+            trig = high * (1 - p["dip_pct"] / 100)
+            if not st_["armed"]:
+                headline = "Waiting — stopped out, needs a bounce before buying again"
+                reason = (f"The last dip hit the stop-loss. It re-arms once the price climbs back above "
+                          f"{trig:,.2f}.")
+                levels.append(_level("Re-arms above", trig, "neutral"))
+            else:
+                headline = f"No dip yet — price is {abs(last / high - 1) * 100:.1f}% below its recent high"
+                reason = f"The strategy buys once the price is {p['dip_pct']}% below its recent high."
+                levels.append(_level(f"Buy at or below (−{p['dip_pct']}%)", trig, "buy"))
+        if action == "BUY":
+            headline = f"Buy signal — price is {p['dip_pct']}%+ below its recent high"
+        if action == "SELL":
+            headline = "Sell signal — exit rule reached"
+
+    for lv in levels:
+        lv["dist_pct"] = (lv["price"] / last - 1) * 100
+
+    return {"key": key, "action": action, "headline": headline, "reason": reason,
+            "levels": levels, "readings": readings, "overlays": overlays, "position": pos,
+            "since_date": since_date, "since_px": since_px, "last": last,
+            "date": df.index[-1]}
+
+
+def signal_track_record(df: pd.DataFrame, pos: pd.Series, key: str) -> dict:
+    """How did past buy signals work out, compared with buying on a random day?
+
+    For each past buy signal, the trade is assumed to happen at the next day's close
+    (same rule as the backtest), and the price change is measured 1, 3 and 6 months later.
+    """
+    px = df["adj_close"].to_numpy()
+    n = len(px)
+    if key in PASSIVE:
+        entries = np.array([], dtype=int)
+    else:
+        p = pos.to_numpy()
+        entries = np.where((p[1:] > 0) & (p[:-1] == 0))[0] + 1
+    out = {"n_signals": int(len(entries)), "horizons": {}}
+    for label, h in HORIZONS.items():
+        base_r = px[h:] / px[:-h] - 1 if n > h else np.array([])
+        buy_idx = entries + 1
+        buy_idx = buy_idx[buy_idx + h < n]
+        sig_r = px[buy_idx + h] / px[buy_idx] - 1 if len(buy_idx) else np.array([])
+        out["horizons"][label] = {
+            "n": int(len(sig_r)),
+            "hit": float((sig_r > 0).mean()) if len(sig_r) else np.nan,
+            "avg": float(sig_r.mean()) if len(sig_r) else np.nan,
+            "base_hit": float((base_r > 0).mean()) if len(base_r) else np.nan,
+            "base_avg": float(base_r.mean()) if len(base_r) else np.nan,
+        }
+    return out
