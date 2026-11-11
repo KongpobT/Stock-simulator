@@ -481,6 +481,9 @@ SIGNAL_CSS = """
 .sig-head{font-size:1.15rem;font-weight:600}
 .sig-body{margin-top:8px;line-height:1.5;font-size:.95rem}
 .sig-muted{opacity:.75;font-size:.88rem}
+.sig-small{padding:12px 16px;border-left-width:4px}
+.sig-small .sig-badge{font-size:.85rem;padding:3px 9px}
+.sig-small .sig-head{font-size:1rem}
 .sig-pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:.78rem;font-weight:600;
   color:#fff;background:var(--c);margin-right:6px}
 </style>
@@ -509,6 +512,147 @@ def _signal_verdict(tr: dict) -> tuple[str, str]:
                            "later). Treat its signals with caution here.")
     return ("info", f"On this stock, this strategy's buy signals have been about as good as buying on a "
                     f"random day ({_pct(h['hit'])} vs {_pct(h['base_hit'])} higher 3 months later).")
+
+
+def _card(color: str, badge: str, head: str, body_html: str) -> None:
+    st.markdown(f"<div class='sig-card' style='--c:{color}'><div class='sig-top'>"
+                f"<span class='sig-badge'>{badge}</span><span class='sig-head'>{head}</span></div>"
+                f"{body_html}</div>", unsafe_allow_html=True)
+
+
+def _levels_table(levels: list[dict]) -> None:
+    st.dataframe(pd.DataFrame([{"Exit rule": lv["label"], "Price": lv["price"],
+                                "From now": lv["dist_pct"]} for lv in levels]),
+                 hide_index=True, width="stretch",
+                 column_config={"Price": st.column_config.NumberColumn(format="%.2f"),
+                                "From now": st.column_config.NumberColumn(format="%+.1f%%")})
+
+
+def personal_buyer_card(data, pick, P, sig, cur):
+    """Answer for someone who doesn't own the stock: buy now, or wait?"""
+    a_ = sig["action"]
+    last = float(data["close"].iloc[-1])
+    body = ""
+    if a_ == "BUY":
+        color, badge, head = "#1baf7a", "BUY NOW", "The buy rule triggered at the latest close"
+        body = "<div class='sig-body'>This is the moment the strategy would buy — at the next session.</div>"
+    elif a_ == "HOLD":
+        chg = (sig["last"] / sig["since_px"] - 1) * 100
+        color, badge = "#2a78d6", "OK TO BUY — LATE"
+        head = "The strategy is already in and its rule still says own it"
+        body = (f"<div class='sig-body'>It bought on <b>{sig['since_date']:%d %b %Y}</b> at "
+                f"<b>{sig['since_px']:,.2f}</b>. Buying now means joining a trade already in progress, "
+                f"<b>{abs(chg):.1f}% {'higher' if chg >= 0 else 'lower'}</b> than its entry.</div>")
+        if pick in ("mean_rev", "dip"):
+            body += ("<div class='sig-body sig-muted'>Note: this strategy's buy condition is not met "
+                     "today — waiting for the next buy signal would follow the rule more strictly.</div>")
+    elif a_ == "SELL":
+        color, badge, head = "#e34948", "DON'T BUY", "The sell rule triggered at the latest close"
+        body = "<div class='sig-body'>The strategy is getting out — buying now goes against the rule.</div>"
+    elif a_ == "WAIT":
+        color, badge, head = "#8a8a85", "WAIT", "No buy signal yet"
+        buys = [lv for lv in sig["levels"] if lv["kind"] == "buy"]
+        if buys:
+            lv = buys[0]
+            body = (f"<div class='sig-body'>{lv['label']} <b>{lv['price']:,.2f}</b> "
+                    f"({lv['dist_pct']:+.1f}% from now).</div>")
+        else:
+            body = f"<div class='sig-body'>{sig['reason']}</div>"
+    else:
+        color, badge = "#6250d6", "BUY (PASSIVE)"
+        head = {"dca": "Invest your monthly amount as usual"}.get(pick, "This strategy buys regardless of price")
+        body = "<div class='sig-body'>Timing doesn't matter to this strategy — it just invests and holds.</div>"
+
+    pc = None
+    if a_ in ("BUY", "HOLD", "INVEST"):
+        pc = S.position_check(data, pick, P, data.index[-1], last)
+        downs = [lv for lv in pc["levels"] if lv["dist_pct"] < 0]
+        ups = [lv for lv in pc["levels"] if lv["dist_pct"] > 0]
+        parts = []
+        if downs:
+            parts.append(f"if it goes wrong, the rule sells at <b>{downs[0]['price']:,.2f}</b> "
+                         f"(<b>{downs[0]['dist_pct']:+.1f}%</b>)")
+        if ups:
+            parts.append(f"if it goes right, it sells at <b>{ups[0]['price']:,.2f}</b> "
+                         f"(<b>{ups[0]['dist_pct']:+.1f}%</b>)")
+        if parts:
+            body += f"<div class='sig-body'>If you buy now at about {last:,.2f}: " + "; ".join(parts) + ".</div>"
+        if downs and ups:
+            rr = ups[0]["dist_pct"] / abs(downs[0]["dist_pct"])
+            body += (f"<div class='sig-body sig-muted'>Possible gain is {rr:.1f}× the possible loss "
+                     f"{'(favourable)' if rr >= 2 else '(not much reward for the risk)' if rr < 1 else ''}.</div>")
+        if not downs and pick == "trend":
+            body += ("<div class='sig-body sig-muted'>The sell rule (averages crossing down) is more than "
+                     "one day's fall away, so there's no single sell price yet. It can still mean a "
+                     "sizeable drop before it triggers.</div>")
+        elif not downs and pick not in S.PASSIVE:
+            body += ("<div class='sig-body sig-muted'>⚠️ This rule has no stop-loss below today's price — "
+                     "decide yourself how much of a fall you'd accept.</div>")
+    _card(color, badge, head, body)
+    if pc and pc["levels"]:
+        st.markdown("**Where the rule would sell if you bought today**")
+        _levels_table(pc["levels"])
+
+
+def personal_owned_card(data, pick, P, sig, bdate, bprice, shares, cur, sym):
+    """Answer for someone who owns the stock: keep or sell, judged on their own purchase."""
+    bts = pd.Timestamp(bdate)
+    pc = S.position_check(data, pick, P, bts, float(bprice))
+    last = pc["last"]
+    if not pc["in_range"]:
+        st.warning("Your buy date is before the price history loaded. Set **From** in the sidebar "
+                   "earlier than your buy date and press Run, so peaks and dividends are complete.")
+    on_day = data["close"][data.index >= bts]
+    if len(on_day) and abs(bprice / float(on_day.iloc[0]) - 1) > 0.25:
+        st.warning(f"The price you paid ({bprice:,.2f}) is far from the market price around that date "
+                   f"({float(on_day.iloc[0]):,.2f}). Check the date and price — and that the stock "
+                   "hasn't had a split since.")
+
+    near = [lv for lv in pc["levels"] if abs(lv["dist_pct"]) <= 3]
+    if pick in S.PASSIVE:
+        color, badge, head = "#6250d6", "KEEP", "A passive strategy holds through ups and downs"
+    elif pc["sell_now"]:
+        color, badge, head = "#e34948", "SELL", "Your position meets the sell rule at the latest close"
+    elif near:
+        color, badge = "#eda100", "KEEP — WATCH"
+        head = f"Keep for now, but a sell level is only {abs(near[0]['dist_pct']):.1f}% away"
+    else:
+        color, badge, head = "#2a78d6", "KEEP", "No sell rule has triggered for your position"
+
+    pl, pl_d = pc["pl_pct"], pc["pl_incl_div_pct"]
+    pl_cls = "#1baf7a" if pl >= 0 else "#e34948"
+    body = (f"<div class='sig-body'>Bought <b>{bts:%d %b %Y}</b> at <b>{bprice:,.2f}</b> → now "
+            f"<b>{last:,.2f}</b>: <b style='color:{pl_cls}'>{pl:+.1f}%</b> after {pc['days']} days.")
+    if pc["divs"] > 0:
+        body += (f" Dividends since: {pc['divs']:,.2f} per share → <b>{pl_d:+.1f}%</b> including "
+                 "dividends.")
+    body += "</div>"
+    if shares:
+        val = shares * last
+        prof = shares * (last - bprice)
+        body += (f"<div class='sig-body'>{shares:,} shares worth <b>{cur}{val:,.0f}</b> · profit "
+                 f"<b style='color:{pl_cls}'>{cur}{prof:+,.0f}</b>"
+                 + (f" + {cur}{shares * pc['divs']:,.0f} dividends" if pc["divs"] > 0 else "")
+                 + " (before fees and tax).</div>")
+    body += f"<div class='sig-body'>{pc['why']}</div>"
+    if sig["action"] == "BUY" and pick not in S.PASSIVE:
+        body += ("<div class='sig-body'>➕ The strategy also gave a fresh <b>buy signal</b> today — "
+                 "adding more would fit the rule.</div>")
+    if pick not in S.PASSIVE and pc["strat_in_on_buy"] is not None:
+        if pc["strat_in_on_buy"]:
+            when = (f" (its buy signal was on {pc['last_signal_before']:%d %b %Y})"
+                    if pc["last_signal_before"] is not None else "")
+            body += (f"<div class='sig-body sig-muted'>When you bought, this strategy was also in the "
+                     f"stock{when} — your purchase fits its rule.</div>")
+        else:
+            nxt = (f" Its next buy signal came on {pc['next_signal_after']:%d %b %Y}."
+                   if pc["next_signal_after"] is not None else "")
+            body += (f"<div class='sig-body sig-muted'>When you bought, this strategy was <b>out</b> of "
+                     f"the stock — you bought outside its rule.{nxt}</div>")
+    _card(color, badge, head, body)
+    if pc["levels"]:
+        st.markdown("**Exit levels for your position**")
+        _levels_table(pc["levels"])
 
 
 @st.fragment
@@ -541,22 +685,45 @@ def signal_tab(ticker, df, bench, chosen, P, fee, cur, bench_ticker):
                         help="Change this strategy's rules in the sidebar — the signal updates.")
 
     data = bench if pick == "index" else df
+    sym = bench_ticker if pick == "index" else ticker
     sig = S.todays_signal(data, pick, P, bench)
+
+    # ---- YOUR POSITION -----------------------------------------------------
+    st.markdown(f"##### Your position in {sym}")
+    own = st.radio("Do you own it?", ["I don't own it yet — should I buy now?",
+                                      "I already own it — keep or sell?"],
+                   horizontal=True, key=f"own_{sym}", label_visibility="collapsed")
+    owned = own.startswith("I already")
+    last_px = float(data["close"].iloc[-1])
+    if owned:
+        c1, c2, c3 = st.columns(3)
+        bdate = c1.date_input("Date you bought", value=(data.index[-1] - pd.Timedelta(days=30)).date(),
+                              min_value=date(1990, 1, 1), max_value=data.index[-1].date(),
+                              key=f"bd_{sym}")
+        bprice = c2.number_input("Price you paid per share", min_value=0.0001, value=round(last_px, 2),
+                                 step=0.25, format="%.2f", key=f"bp_{sym}")
+        shares = c3.number_input("Shares (optional)", min_value=0, value=0, step=100, key=f"sh_{sym}",
+                                 help="Add this to see your profit in money, not just %.")
+        st.caption("These are kept while the app is open. Re-enter them after reloading the page.")
+        personal_owned_card(data, pick, P, sig, bdate, bprice, shares, cur, sym)
+    else:
+        personal_buyer_card(data, pick, P, sig, cur)
+
+    # ---- WHAT THE STRATEGY ITSELF IS DOING -----------------------------------
+    st.markdown("##### What the strategy is doing")
     label, color = ACTION_STYLE[sig["action"]]
     extra = ""
     if sig["since_date"] is not None and sig["action"] == "HOLD":
         chg = (sig["last"] / sig["since_px"] - 1) * 100
         days = (sig["date"] - sig["since_date"]).days
         extra = (f"<div class='sig-body'>In the stock since <b>{sig['since_date']:%d %b %Y}</b> at "
-                 f"<b>{sig['since_px']:,.2f}</b> ({chg:+.1f}% since, {days} days). "
-                 f"<span class='sig-muted'>If you don't own it yet, buying now means entering "
-                 f"{abs(chg):.1f}% {'higher' if chg >= 0 else 'lower'} than the strategy did.</span></div>")
+                 f"<b>{sig['since_px']:,.2f}</b> ({chg:+.1f}% since, {days} days).</div>")
     near = [lv for lv in sig["levels"] if lv["kind"] == "buy" and abs(lv["dist_pct"]) <= 3]
     if sig["action"] == "WAIT" and near:
         extra += (f"<div class='sig-body'>⚡ <b>Close to a buy signal</b> — the trigger is only "
                   f"{abs(near[0]['dist_pct']):.1f}% away.</div>")
     st.markdown(
-        f"<div class='sig-card' style='--c:{color}'><div class='sig-top'>"
+        f"<div class='sig-card sig-small' style='--c:{color}'><div class='sig-top'>"
         f"<span class='sig-badge'>{label}</span><span class='sig-head'>{sig['headline']}</span></div>"
         f"<div class='sig-body'>{sig['reason']}</div>{extra}"
         f"<div class='sig-body sig-muted'>{ACTION_MEANING[sig['action']]} "
@@ -1148,6 +1315,7 @@ with tab_help:
 
 **Today's signal**
 
+- **Your position** — choose *I don't own it yet* for a buy-now answer (BUY NOW, OK TO BUY — LATE, WAIT or DON'T BUY) with where the rule would sell if you bought today. Choose *I already own it* and enter your buy date, price and shares: the strategy's sell rules are applied to **your** purchase (KEEP, KEEP — WATCH or SELL), with your profit, dividends received and exit levels.
 - **BUY / SELL** — the strategy's rule triggered at the latest close; it would act at the next session.
 - **HOLD** — it's already in from an earlier buy signal. The card shows when, and how far the price has moved since.
 - **STAY OUT** — no buy signal; it would keep the money in cash.

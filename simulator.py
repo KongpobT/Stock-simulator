@@ -923,3 +923,127 @@ def signal_track_record(df: pd.DataFrame, pos: pd.Series, key: str) -> dict:
             "base_avg": float(base_r.mean()) if len(base_r) else np.nan,
         }
     return out
+
+
+# ---------------------------------------------------------------------------
+# 8. YOUR POSITION
+#    Applies the strategy's SELL rules to a real (or hypothetical) purchase.
+#    Uses actual traded prices (not dividend-adjusted) so it matches your broker.
+# ---------------------------------------------------------------------------
+
+def position_check(df: pd.DataFrame, key: str, p: dict, buy_date, buy_price: float) -> dict:
+    """Would this strategy sell a position bought on `buy_date` at `buy_price`?
+
+    Returns sell_now (bool), why (text), exit levels, profit/loss, dividends since buying,
+    and what the strategy itself was doing on the buy date.
+    """
+    buy_date = pd.Timestamp(buy_date).normalize()
+    close, adj = df["close"], df["adj_close"]
+    last = float(close.iloc[-1])
+    since = close[close.index >= buy_date]
+    divs = float(df["dividends"][df.index > buy_date].sum())
+    levels: list[dict] = []
+    sell_now, why = False, ""
+
+    if key in PASSIVE:
+        why = "A passive strategy never sells — it just holds."
+
+    elif key == "trend":
+        kind = p.get("ma_type", "SMA")
+        nf, ns = int(p["sma_fast"]), int(p["sma_slow"])
+        fast = float(moving_avg(adj, nf, kind).iloc[-1])
+        slow = float(moving_avg(adj, ns, kind).iloc[-1])
+        sell_now = fast <= slow
+        why = (f"The {nf}-day {kind} ({fast:,.2f}) is {'below' if sell_now else 'above'} the "
+               f"{ns}-day {kind} ({slow:,.2f}) — the trend rule says "
+               f"{'get out' if sell_now else 'stay in'}.")
+        if not sell_now:
+            cross = _ma_cross_price(adj.to_numpy(), fast, slow, nf, ns, kind)
+            if np.isfinite(cross) and 0 < cross < last:
+                levels.append(_level("Sell if it closes below (averages cross down)", cross, "stop"))
+
+    elif key == "mean_rev":
+        n = int(p["rsi_period"])
+        r = float(rsi(adj, n).iloc[-1])
+        sell_now = r > p["rsi_sell"]
+        why = (f"RSI is {r:.0f}. The rule sells once RSI rises above {p['rsi_sell']} "
+               f"(overbought){' — it is there now' if sell_now else ''}. It has no stop-loss.")
+        if not sell_now:
+            levels.append(_level(f"Sell if it closes above (RSI > {p['rsi_sell']})",
+                                 _rsi_trigger_price(adj, n, p["rsi_sell"], "up"), "target"))
+
+    elif key == "momentum":
+        peak = max(buy_price, float(since.max()) if len(since) else buy_price)
+        stop_px = peak * (1 - p["trailing_stop"] / 100)
+        sell_now = last < stop_px
+        why = (f"Highest close since you bought: {peak:,.2f}. The trailing stop sells if the price "
+               f"closes {p['trailing_stop']}% below that peak.")
+        levels.append(_level(f"Trailing stop ({p['trailing_stop']}% below peak)", stop_px, "stop"))
+
+    elif key == "value":
+        _, mode = sig_value(df, p)
+        if mode.startswith("dividend"):
+            y = trailing_dividend_yield(df)
+            hist = y.where(df.index >= df.index[0] + pd.Timedelta(days=365)).dropna()
+            y_now = float(y.iloc[-1])
+            y_sell = float(hist.quantile(p["value_sell_pct"] / 100)) if len(hist) else np.nan
+            sell_now = bool(y_now <= y_sell)
+            why = (f"Dividend yield is {y_now * 100:.2f}%. The rule sells when it falls to "
+                   f"{y_sell * 100:.2f}% or lower (the stock looks expensive).")
+            if not sell_now and y_sell > 0:
+                levels.append(_level("Sell at or above (looks expensive)", last * y_now / y_sell, "target"))
+        else:
+            fair = float(adj.rolling(p["value_window"], min_periods=TRADING_DAYS).mean().iloc[-1])
+            sell_now = last >= fair
+            why = (f"The 3-year average price is {fair:,.2f}. The rule sells once the price is back "
+                   "at that average.")
+            if not sell_now:
+                levels.append(_level("Sell at or above (back to average)", fair, "target"))
+        why += " It has no stop-loss."
+
+    elif key == "dip":
+        lb = int(p["dip_lookback"])
+        before = close[close.index <= buy_date].iloc[-lb:]
+        ref_high = float(before.max()) if len(before) else buy_price
+        mode = p["dip_exit"]
+        if mode == "recover":
+            sell_now = last >= ref_high
+            levels.append(_level("Sell at or above (back at the old high)", ref_high, "target"))
+            why = f"The high before your purchase was {ref_high:,.2f}. The rule sells when the price gets back there."
+        elif mode == "target":
+            tgt = buy_price * (1 + p["dip_take_profit"] / 100)
+            sell_now = last >= tgt
+            levels.append(_level(f"Sell at or above (+{p['dip_take_profit']}% target)", tgt, "target"))
+            why = f"The rule sells once you're up {p['dip_take_profit']}%."
+        else:
+            why = "Your exit setting is 'never sell', so the rule just holds."
+        if p.get("dip_stop", 0) > 0:
+            stop_px = buy_price * (1 - p["dip_stop"] / 100)
+            if last <= stop_px:
+                sell_now = True
+            levels.append(_level(f"Stop-loss ({p['dip_stop']}% below your price)", stop_px, "stop"))
+            why += f" Stop-loss at −{p['dip_stop']}%."
+        else:
+            why += " No stop-loss is set."
+
+    for lv in levels:
+        lv["dist_pct"] = (lv["price"] / last - 1) * 100
+
+    # what was the strategy doing when you bought?
+    pos = strategy_position(df, key, p)
+    on_buy = pos[pos.index <= buy_date]
+    strat_in = bool(on_buy.iloc[-1]) if len(on_buy) else None
+    starts = pos.index[pos.diff() > 0]
+    prior = starts[starts <= buy_date]
+    after = starts[starts > buy_date]
+
+    return {
+        "sell_now": bool(sell_now), "why": why, "levels": levels,
+        "pl_pct": (last / buy_price - 1) * 100 if buy_price else np.nan,
+        "pl_incl_div_pct": ((last + divs) / buy_price - 1) * 100 if buy_price else np.nan,
+        "divs": divs, "days": int((df.index[-1] - buy_date).days), "last": last,
+        "strat_in_on_buy": strat_in,
+        "last_signal_before": prior[-1] if len(prior) else None,
+        "next_signal_after": after[0] if len(after) else None,
+        "in_range": buy_date >= df.index[0],
+    }
